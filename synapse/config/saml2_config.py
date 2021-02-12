@@ -15,14 +15,15 @@
 # limitations under the License.
 
 import logging
-import os
+from typing import Any, List
 
-import pkg_resources
+import attr
 
 from synapse.python_dependencies import DependencyException, check_requirements
 from synapse.util.module_loader import load_module, load_python_module
 
 from ._base import Config, ConfigError
+from ._util import validate_config
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +81,16 @@ class SAML2Config(Config):
 
         self.saml2_enabled = True
 
+        attribute_requirements = saml2_config.get("attribute_requirements") or []
+        self.attribute_requirements = _parse_attribute_requirements_def(
+            attribute_requirements
+        )
+
         self.saml2_grandfathered_mxid_source_attribute = saml2_config.get(
             "grandfathered_mxid_source_attribute", "uid"
         )
+
+        self.saml2_idp_entityid = saml2_config.get("idp_entityid", None)
 
         # user_mapping_provider may be None if the key is present but has no value
         ump_dict = saml2_config.get("user_mapping_provider") or {}
@@ -117,7 +125,7 @@ class SAML2Config(Config):
         (
             self.saml2_user_mapping_provider_class,
             self.saml2_user_mapping_provider_config,
-        ) = load_module(ump_dict)
+        ) = load_module(ump_dict, ("saml2_config", "user_mapping_provider"))
 
         # Ensure loaded user mapping module has defined all necessary methods
         # Note parse_config() is already checked during the call to load_module
@@ -160,15 +168,7 @@ class SAML2Config(Config):
 
         # session lifetime: in milliseconds
         self.saml2_session_lifetime = self.parse_duration(
-            saml2_config.get("saml_session_lifetime", "5m")
-        )
-
-        template_dir = saml2_config.get("template_dir")
-        if not template_dir:
-            template_dir = pkg_resources.resource_filename("synapse", "res/templates",)
-
-        self.saml2_error_html_content = self.read_file(
-            os.path.join(template_dir, "saml_error.html"), "saml2_config.saml_error",
+            saml2_config.get("saml_session_lifetime", "15m")
         )
 
     def _default_saml_config_dict(
@@ -189,8 +189,6 @@ class SAML2Config(Config):
         import saml2
 
         public_baseurl = self.public_baseurl
-        if public_baseurl is None:
-            raise ConfigError("saml2_config requires a public_baseurl to be set")
 
         if self.saml2_grandfathered_mxid_source_attribute:
             optional_attributes.add(self.saml2_grandfathered_mxid_source_attribute)
@@ -216,15 +214,23 @@ class SAML2Config(Config):
 
     def generate_config_section(self, config_dir_path, server_name, **kwargs):
         return """\
+        ## Single sign-on integration ##
+
+        # The following settings can be used to make Synapse use a single sign-on
+        # provider for authentication, instead of its internal password database.
+        #
+        # You will probably also want to set the following options to `false` to
+        # disable the regular login/registration flows:
+        #   * enable_registration
+        #   * password_config.enabled
+        #
+        # You will also want to investigate the settings under the "sso" configuration
+        # section below.
+
         # Enable SAML2 for registration and login. Uses pysaml2.
         #
         # At least one of `sp_config` or `config_path` must be set in this section to
         # enable SAML login.
-        #
-        # (You will probably also want to set the following options to `false` to
-        # disable the regular login/registration flows:
-        #   * enable_registration
-        #   * password_config.enabled
         #
         # Once SAML support is enabled, a metadata file will be exposed at
         # https://<server>:<port>/_matrix/saml2/metadata.xml, which you may be able to
@@ -240,40 +246,70 @@ class SAML2Config(Config):
           # so it is not normally necessary to specify them unless you need to
           # override them.
           #
-          #sp_config:
-          #  # point this to the IdP's metadata. You can use either a local file or
-          #  # (preferably) a URL.
-          #  metadata:
-          #    #local: ["saml2/idp.xml"]
-          #    remote:
-          #      - url: https://our_idp/metadata.xml
-          #
-          #  # By default, the user has to go to our login page first. If you'd like
-          #  # to allow IdP-initiated login, set 'allow_unsolicited: true' in a
-          #  # 'service.sp' section:
-          #  #
-          #  #service:
-          #  #  sp:
-          #  #    allow_unsolicited: true
-          #
-          #  # The examples below are just used to generate our metadata xml, and you
-          #  # may well not need them, depending on your setup. Alternatively you
-          #  # may need a whole lot more detail - see the pysaml2 docs!
-          #
-          #  description: ["My awesome SP", "en"]
-          #  name: ["Test SP", "en"]
-          #
-          #  organization:
-          #    name: Example com
-          #    display_name:
-          #      - ["Example co", "en"]
-          #    url: "http://example.com"
-          #
-          #  contact_person:
-          #    - given_name: Bob
-          #      sur_name: "the Sysadmin"
-          #      email_address": ["admin@example.com"]
-          #      contact_type": technical
+          sp_config:
+            # Point this to the IdP's metadata. You must provide either a local
+            # file via the `local` attribute or (preferably) a URL via the
+            # `remote` attribute.
+            #
+            #metadata:
+            #  local: ["saml2/idp.xml"]
+            #  remote:
+            #    - url: https://our_idp/metadata.xml
+
+            # Allowed clock difference in seconds between the homeserver and IdP.
+            #
+            # Uncomment the below to increase the accepted time difference from 0 to 3 seconds.
+            #
+            #accepted_time_diff: 3
+
+            # By default, the user has to go to our login page first. If you'd like
+            # to allow IdP-initiated login, set 'allow_unsolicited: true' in a
+            # 'service.sp' section:
+            #
+            #service:
+            #  sp:
+            #    allow_unsolicited: true
+
+            # The examples below are just used to generate our metadata xml, and you
+            # may well not need them, depending on your setup. Alternatively you
+            # may need a whole lot more detail - see the pysaml2 docs!
+
+            #description: ["My awesome SP", "en"]
+            #name: ["Test SP", "en"]
+
+            #ui_info:
+            #  display_name:
+            #    - lang: en
+            #      text: "Display Name is the descriptive name of your service."
+            #  description:
+            #    - lang: en
+            #      text: "Description should be a short paragraph explaining the purpose of the service."
+            #  information_url:
+            #    - lang: en
+            #      text: "https://example.com/terms-of-service"
+            #  privacy_statement_url:
+            #    - lang: en
+            #      text: "https://example.com/privacy-policy"
+            #  keywords:
+            #    - lang: en
+            #      text: ["Matrix", "Element"]
+            #  logo:
+            #    - lang: en
+            #      text: "https://example.com/logo.svg"
+            #      width: "200"
+            #      height: "80"
+
+            #organization:
+            #  name: Example com
+            #  display_name:
+            #    - ["Example co", "en"]
+            #  url: "http://example.com"
+
+            #contact_person:
+            #  - given_name: Bob
+            #    sur_name: "the Sysadmin"
+            #    email_address": ["admin@example.com"]
+            #    contact_type": technical
 
           # Instead of putting the config inline as above, you can specify a
           # separate pysaml2 configuration file:
@@ -282,7 +318,7 @@ class SAML2Config(Config):
 
           # The lifetime of a SAML session. This defines how long a user has to
           # complete the authentication process, if allow_unsolicited is unset.
-          # The default is 5 minutes.
+          # The default is 15 minutes.
           #
           #saml_session_lifetime: 5m
 
@@ -337,24 +373,55 @@ class SAML2Config(Config):
           #
           #grandfathered_mxid_source_attribute: upn
 
-          # Directory in which Synapse will try to find the template files below.
-          # If not set, default templates from within the Synapse package will be used.
+          # It is possible to configure Synapse to only allow logins if SAML attributes
+          # match particular values. The requirements can be listed under
+          # `attribute_requirements` as shown below. All of the listed attributes must
+          # match for the login to be permitted.
           #
-          # DO NOT UNCOMMENT THIS SETTING unless you want to customise the templates.
-          # If you *do* uncomment it, you will need to make sure that all the templates
-          # below are in the directory.
+          #attribute_requirements:
+          #  - attribute: userGroup
+          #    value: "staff"
+          #  - attribute: department
+          #    value: "sales"
+
+          # If the metadata XML contains multiple IdP entities then the `idp_entityid`
+          # option must be set to the entity to redirect users to.
           #
-          # Synapse will look for the following templates in this directory:
+          # Most deployments only have a single IdP entity and so should omit this
+          # option.
           #
-          # * HTML page to display to users if something goes wrong during the
-          #   authentication process: 'saml_error.html'.
-          #
-          #   This template doesn't currently need any variable to render.
-          #
-          # You can see the default templates at:
-          # https://github.com/matrix-org/synapse/tree/master/synapse/res/templates
-          #
-          #template_dir: "res/templates"
+          #idp_entityid: 'https://our_idp/entityid'
         """ % {
             "config_dir_path": config_dir_path
         }
+
+
+@attr.s(frozen=True)
+class SamlAttributeRequirement:
+    """Object describing a single requirement for SAML attributes."""
+
+    attribute = attr.ib(type=str)
+    value = attr.ib(type=str)
+
+    JSON_SCHEMA = {
+        "type": "object",
+        "properties": {"attribute": {"type": "string"}, "value": {"type": "string"}},
+        "required": ["attribute", "value"],
+    }
+
+
+ATTRIBUTE_REQUIREMENTS_SCHEMA = {
+    "type": "array",
+    "items": SamlAttributeRequirement.JSON_SCHEMA,
+}
+
+
+def _parse_attribute_requirements_def(
+    attribute_requirements: Any,
+) -> List[SamlAttributeRequirement]:
+    validate_config(
+        ATTRIBUTE_REQUIREMENTS_SCHEMA,
+        attribute_requirements,
+        config_path=["saml2_config", "attribute_requirements"],
+    )
+    return [SamlAttributeRequirement(**x) for x in attribute_requirements]

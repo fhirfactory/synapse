@@ -12,20 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import json
 import logging
 import random
 import time
+from io import BytesIO
+from typing import Callable, Dict, Optional, Tuple
 
 import attr
 
 from twisted.internet import defer
-from twisted.web.client import RedirectAgent, readBody
+from twisted.internet.interfaces import IReactorTime
+from twisted.web.client import RedirectAgent
 from twisted.web.http import stringToDatetime
+from twisted.web.http_headers import Headers
+from twisted.web.iweb import IAgent, IResponse
 
+from synapse.http.client import BodyExceededMaxSize, read_body_with_max_size
 from synapse.logging.context import make_deferred_yieldable
-from synapse.util import Clock
+from synapse.util import Clock, json_decoder
 from synapse.util.caches.ttlcache import TTLCache
 from synapse.util.metrics import Measure
 
@@ -51,6 +55,9 @@ WELL_KNOWN_MAX_CACHE_PERIOD = 48 * 3600
 # lower bound for .well-known cache period
 WELL_KNOWN_MIN_CACHE_PERIOD = 5 * 60
 
+# The maximum size (in bytes) to allow a well-known file to be.
+WELL_KNOWN_MAX_SIZE = 50 * 1024  # 50 KiB
+
 # Attempt to refetch a cached well-known N% of the TTL before it expires.
 # e.g. if set to 0.2 and we have a cached entry with a TTL of 5mins, then
 # we'll start trying to refetch 1 minute before it expires.
@@ -69,16 +76,21 @@ _had_valid_well_known_cache = TTLCache("had-valid-well-known")
 
 
 @attr.s(slots=True, frozen=True)
-class WellKnownLookupResult(object):
+class WellKnownLookupResult:
     delegated_server = attr.ib()
 
 
-class WellKnownResolver(object):
+class WellKnownResolver:
     """Handles well-known lookups for matrix servers.
     """
 
     def __init__(
-        self, reactor, agent, well_known_cache=None, had_well_known_cache=None
+        self,
+        reactor: IReactorTime,
+        agent: IAgent,
+        user_agent: bytes,
+        well_known_cache: Optional[TTLCache] = None,
+        had_well_known_cache: Optional[TTLCache] = None,
     ):
         self._reactor = reactor
         self._clock = Clock(reactor)
@@ -92,16 +104,16 @@ class WellKnownResolver(object):
         self._well_known_cache = well_known_cache
         self._had_valid_well_known_cache = had_well_known_cache
         self._well_known_agent = RedirectAgent(agent)
+        self.user_agent = user_agent
 
-    @defer.inlineCallbacks
-    def get_well_known(self, server_name):
+    async def get_well_known(self, server_name: bytes) -> WellKnownLookupResult:
         """Attempt to fetch and parse a .well-known file for the given server
 
         Args:
-            server_name (bytes): name of the server, from the requested url
+            server_name: name of the server, from the requested url
 
         Returns:
-            Deferred[WellKnownLookupResult]: The result of the lookup
+            The result of the lookup
         """
         try:
             prev_result, expiry, ttl = self._well_known_cache.get_with_expiry(
@@ -118,7 +130,9 @@ class WellKnownResolver(object):
         # requests for the same server in parallel?
         try:
             with Measure(self._clock, "get_well_known"):
-                result, cache_period = yield self._fetch_well_known(server_name)
+                result, cache_period = await self._fetch_well_known(
+                    server_name
+                )  # type: Optional[bytes], float
 
         except _FetchWellKnownFailure as e:
             if prev_result and e.temporary:
@@ -147,26 +161,25 @@ class WellKnownResolver(object):
 
         return WellKnownLookupResult(delegated_server=result)
 
-    @defer.inlineCallbacks
-    def _fetch_well_known(self, server_name):
+    async def _fetch_well_known(self, server_name: bytes) -> Tuple[bytes, float]:
         """Actually fetch and parse a .well-known, without checking the cache
 
         Args:
-            server_name (bytes): name of the server, from the requested url
+            server_name: name of the server, from the requested url
 
         Raises:
             _FetchWellKnownFailure if we fail to lookup a result
 
         Returns:
-            Deferred[Tuple[bytes,int]]: The lookup result and cache period.
+            The lookup result and cache period.
         """
 
         had_valid_well_known = self._had_valid_well_known_cache.get(server_name, False)
 
         # We do this in two steps to differentiate between possibly transient
-        # errors (e.g. can't connect to host, 503 response) and more permenant
+        # errors (e.g. can't connect to host, 503 response) and more permanent
         # errors (such as getting a 404 response).
-        response, body = yield self._make_well_known_request(
+        response, body = await self._make_well_known_request(
             server_name, retry=had_valid_well_known
         )
 
@@ -174,7 +187,7 @@ class WellKnownResolver(object):
             if response.code != 200:
                 raise Exception("Non-200 response %s" % (response.code,))
 
-            parsed_body = json.loads(body.decode("utf-8"))
+            parsed_body = json_decoder.decode(body.decode("utf-8"))
             logger.info("Response from .well-known: %s", parsed_body)
 
             result = parsed_body["m.server"].encode("ascii")
@@ -209,23 +222,30 @@ class WellKnownResolver(object):
 
         return result, cache_period
 
-    @defer.inlineCallbacks
-    def _make_well_known_request(self, server_name, retry):
+    async def _make_well_known_request(
+        self, server_name: bytes, retry: bool
+    ) -> Tuple[IResponse, bytes]:
         """Make the well known request.
 
         This will retry the request if requested and it fails (with unable
         to connect or receives a 5xx error).
 
         Args:
-            server_name (bytes)
-            retry (bool): Whether to retry the request if it fails.
+            server_name: name of the server, from the requested url
+            retry: Whether to retry the request if it fails.
+
+        Raises:
+            _FetchWellKnownFailure if we fail to lookup a result
 
         Returns:
-            Deferred[tuple[IResponse, bytes]] Returns the response object and
-            body. Response may be a non-200 response.
+            Returns the response object and body. Response may be a non-200 response.
         """
         uri = b"https://%s/.well-known/matrix/server" % (server_name,)
         uri_str = uri.decode("ascii")
+
+        headers = {
+            b"User-Agent": [self.user_agent],
+        }
 
         i = 0
         while True:
@@ -233,10 +253,16 @@ class WellKnownResolver(object):
 
             logger.info("Fetching %s", uri_str)
             try:
-                response = yield make_deferred_yieldable(
-                    self._well_known_agent.request(b"GET", uri)
+                response = await make_deferred_yieldable(
+                    self._well_known_agent.request(
+                        b"GET", uri, headers=Headers(headers)
+                    )
                 )
-                body = yield make_deferred_yieldable(readBody(response))
+                body_stream = BytesIO()
+                await make_deferred_yieldable(
+                    read_body_with_max_size(response, body_stream, WELL_KNOWN_MAX_SIZE)
+                )
+                body = body_stream.getvalue()
 
                 if 500 <= response.code < 600:
                     raise Exception("Non-200 response %s" % (response.code,))
@@ -245,6 +271,15 @@ class WellKnownResolver(object):
             except defer.CancelledError:
                 # Bail if we've been cancelled
                 raise
+            except BodyExceededMaxSize:
+                # If the well-known file was too large, do not keep attempting
+                # to download it, but consider it a temporary error.
+                logger.warning(
+                    "Requested .well-known file for %s is too large > %r bytes",
+                    server_name.decode("ascii"),
+                    WELL_KNOWN_MAX_SIZE,
+                )
+                raise _FetchWellKnownFailure(temporary=True)
             except Exception as e:
                 if not retry or i >= WELL_KNOWN_RETRY_ATTEMPTS:
                     logger.info("Error fetching %s: %s", uri_str, e)
@@ -253,21 +288,24 @@ class WellKnownResolver(object):
                 logger.info("Error fetching %s: %s. Retrying", uri_str, e)
 
             # Sleep briefly in the hopes that they come back up
-            yield self._clock.sleep(0.5)
+            await self._clock.sleep(0.5)
 
 
-def _cache_period_from_headers(headers, time_now=time.time):
+def _cache_period_from_headers(
+    headers: Headers, time_now: Callable[[], float] = time.time
+) -> Optional[float]:
     cache_controls = _parse_cache_control(headers)
 
     if b"no-store" in cache_controls:
         return 0
 
     if b"max-age" in cache_controls:
-        try:
-            max_age = int(cache_controls[b"max-age"])
-            return max_age
-        except ValueError:
-            pass
+        max_age = cache_controls[b"max-age"]
+        if max_age:
+            try:
+                return int(max_age)
+            except ValueError:
+                pass
 
     expires = headers.getRawHeaders(b"expires")
     if expires is not None:
@@ -283,7 +321,7 @@ def _cache_period_from_headers(headers, time_now=time.time):
     return None
 
 
-def _parse_cache_control(headers):
+def _parse_cache_control(headers: Headers) -> Dict[bytes, Optional[bytes]]:
     cache_controls = {}
     for hdr in headers.getRawHeaders(b"cache-control", []):
         for directive in hdr.split(b","):
@@ -294,7 +332,7 @@ def _parse_cache_control(headers):
     return cache_controls
 
 
-@attr.s()
+@attr.s(slots=True)
 class _FetchWellKnownFailure(Exception):
     # True if we didn't get a non-5xx HTTP response, i.e. this may or may not be
     # a temporary failure.

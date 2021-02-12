@@ -83,7 +83,7 @@ docker logs synapse
 If all is well, you should now be able to connect to http://localhost:8008 and
 see a confirmation message.
 
-The following environment variables are supported in run mode:
+The following environment variables are supported in `run` mode:
 
 * `SYNAPSE_CONFIG_DIR`: where additional config files are stored. Defaults to
   `/data`.
@@ -93,6 +93,35 @@ The following environment variables are supported in run mode:
    Defaults to `synapse.app.homeserver`, which is suitable for non-worker mode.
 * `UID`, `GID`: the user and group id to run Synapse as. Defaults to `991`, `991`.
 * `TZ`: the [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) the container will run with. Defaults to `UTC`.
+
+For more complex setups (e.g. for workers) you can also pass your args directly to synapse using `run` mode. For example like this:
+
+```
+docker run -d --name synapse \
+    --mount type=volume,src=synapse-data,dst=/data \
+    -p 8008:8008 \
+    matrixdotorg/synapse:latest run \
+    -m synapse.app.generic_worker \
+    --config-path=/data/homeserver.yaml \
+    --config-path=/data/generic_worker.yaml
+```
+
+If you do not provide `-m`, the value of the `SYNAPSE_WORKER` environment variable is used. If you do not provide at least one `--config-path` or `-c`, the value of the `SYNAPSE_CONFIG_PATH` environment variable is used instead.
+
+## Generating an (admin) user
+
+After synapse is running, you may wish to create a user via `register_new_matrix_user`.
+
+This requires a `registration_shared_secret` to be set in your config file. Synapse
+must be restarted to pick up this change.
+
+You can then call the script:
+
+```
+docker exec -it synapse register_new_matrix_user http://localhost:8008 -c /data/homeserver.yaml --help
+```
+
+Remember to remove the `registration_shared_secret` and restart if you no-longer need it.
 
 ## TLS support
 
@@ -147,3 +176,32 @@ docker build -t matrixdotorg/synapse -f docker/Dockerfile .
 
 You can choose to build a different docker image by changing the value of the `-f` flag to
 point to another Dockerfile.
+
+## Disabling the healthcheck
+
+If you are using a non-standard port or tls inside docker you can disable the healthcheck
+whilst running the above `docker run` commands. 
+
+```
+   --no-healthcheck
+```
+## Setting custom healthcheck on docker run
+
+If you wish to point the healthcheck at a different port with docker command, add the following
+
+```
+  --health-cmd 'curl -fSs http://localhost:1234/health'
+```
+
+## Setting the healthcheck in docker-compose file
+
+You can add the following to set a custom healthcheck in a docker compose file.
+You will need version >2.1 for this to work. 
+
+```
+healthcheck:
+  test: ["CMD", "curl", "-fSs", "http://localhost:8008/health"]
+  interval: 1m
+  timeout: 10s
+  retries: 3
+```

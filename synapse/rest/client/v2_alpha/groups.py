@@ -15,13 +15,31 @@
 # limitations under the License.
 
 import logging
+from functools import wraps
 
+from synapse.api.errors import SynapseError
 from synapse.http.servlet import RestServlet, parse_json_object_from_request
 from synapse.types import GroupID
 
 from ._base import client_patterns
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_group_id(f):
+    """Wrapper to validate the form of the group ID.
+
+    Can be applied to any on_FOO methods that accepts a group ID as a URL parameter.
+    """
+
+    @wraps(f)
+    def wrapper(self, request, group_id, *args, **kwargs):
+        if not GroupID.is_valid(group_id):
+            raise SynapseError(400, "%s is not a legal group ID" % (group_id,))
+
+        return f(self, request, group_id, *args, **kwargs)
+
+    return wrapper
 
 
 class GroupServlet(RestServlet):
@@ -31,11 +49,12 @@ class GroupServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/profile$")
 
     def __init__(self, hs):
-        super(GroupServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -46,6 +65,7 @@ class GroupServlet(RestServlet):
 
         return 200, group_description
 
+    @_validate_group_id
     async def on_POST(self, request, group_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -65,11 +85,12 @@ class GroupSummaryServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/summary$")
 
     def __init__(self, hs):
-        super(GroupSummaryServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -96,11 +117,12 @@ class GroupSummaryRoomsCatServlet(RestServlet):
     )
 
     def __init__(self, hs):
-        super(GroupSummaryRoomsCatServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, category_id, room_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -116,6 +138,7 @@ class GroupSummaryRoomsCatServlet(RestServlet):
 
         return 200, resp
 
+    @_validate_group_id
     async def on_DELETE(self, request, group_id, category_id, room_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -136,11 +159,12 @@ class GroupCategoryServlet(RestServlet):
     )
 
     def __init__(self, hs):
-        super(GroupCategoryServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id, category_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -151,6 +175,7 @@ class GroupCategoryServlet(RestServlet):
 
         return 200, category
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, category_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -162,6 +187,7 @@ class GroupCategoryServlet(RestServlet):
 
         return 200, resp
 
+    @_validate_group_id
     async def on_DELETE(self, request, group_id, category_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -180,11 +206,12 @@ class GroupCategoriesServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/categories/$")
 
     def __init__(self, hs):
-        super(GroupCategoriesServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -203,11 +230,12 @@ class GroupRoleServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/roles/(?P<role_id>[^/]+)$")
 
     def __init__(self, hs):
-        super(GroupRoleServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id, role_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -218,6 +246,7 @@ class GroupRoleServlet(RestServlet):
 
         return 200, category
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, role_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -229,6 +258,7 @@ class GroupRoleServlet(RestServlet):
 
         return 200, resp
 
+    @_validate_group_id
     async def on_DELETE(self, request, group_id, role_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -247,11 +277,12 @@ class GroupRolesServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/roles/$")
 
     def __init__(self, hs):
-        super(GroupRolesServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -278,11 +309,12 @@ class GroupSummaryUsersRoleServlet(RestServlet):
     )
 
     def __init__(self, hs):
-        super(GroupSummaryUsersRoleServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, role_id, user_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -298,6 +330,7 @@ class GroupSummaryUsersRoleServlet(RestServlet):
 
         return 200, resp
 
+    @_validate_group_id
     async def on_DELETE(self, request, group_id, role_id, user_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -316,11 +349,12 @@ class GroupRoomServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/rooms$")
 
     def __init__(self, hs):
-        super(GroupRoomServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -339,11 +373,12 @@ class GroupUsersServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/users$")
 
     def __init__(self, hs):
-        super(GroupUsersServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id):
         requester = await self.auth.get_user_by_req(request, allow_guest=True)
         requester_user_id = requester.user.to_string()
@@ -362,11 +397,12 @@ class GroupInvitedUsersServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/invited_users$")
 
     def __init__(self, hs):
-        super(GroupInvitedUsersServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_GET(self, request, group_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -385,10 +421,11 @@ class GroupSettingJoinPolicyServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/settings/m.join_policy$")
 
     def __init__(self, hs):
-        super(GroupSettingJoinPolicyServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -409,7 +446,7 @@ class GroupCreateServlet(RestServlet):
     PATTERNS = client_patterns("/create_group$")
 
     def __init__(self, hs):
-        super(GroupCreateServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
@@ -440,11 +477,12 @@ class GroupAdminRoomsServlet(RestServlet):
     )
 
     def __init__(self, hs):
-        super(GroupAdminRoomsServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, room_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -456,6 +494,7 @@ class GroupAdminRoomsServlet(RestServlet):
 
         return 200, result
 
+    @_validate_group_id
     async def on_DELETE(self, request, group_id, room_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -477,11 +516,12 @@ class GroupAdminRoomsConfigServlet(RestServlet):
     )
 
     def __init__(self, hs):
-        super(GroupAdminRoomsConfigServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, room_id, config_key):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -503,13 +543,14 @@ class GroupAdminUsersInviteServlet(RestServlet):
     )
 
     def __init__(self, hs):
-        super(GroupAdminUsersInviteServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
         self.store = hs.get_datastore()
         self.is_mine_id = hs.is_mine_id
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, user_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -532,11 +573,12 @@ class GroupAdminUsersKickServlet(RestServlet):
     )
 
     def __init__(self, hs):
-        super(GroupAdminUsersKickServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id, user_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -556,11 +598,12 @@ class GroupSelfLeaveServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/self/leave$")
 
     def __init__(self, hs):
-        super(GroupSelfLeaveServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -580,11 +623,12 @@ class GroupSelfJoinServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/self/join$")
 
     def __init__(self, hs):
-        super(GroupSelfJoinServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -604,11 +648,12 @@ class GroupSelfAcceptInviteServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/self/accept_invite$")
 
     def __init__(self, hs):
-        super(GroupSelfAcceptInviteServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -628,11 +673,12 @@ class GroupSelfUpdatePublicityServlet(RestServlet):
     PATTERNS = client_patterns("/groups/(?P<group_id>[^/]*)/self/update_publicity$")
 
     def __init__(self, hs):
-        super(GroupSelfUpdatePublicityServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.store = hs.get_datastore()
 
+    @_validate_group_id
     async def on_PUT(self, request, group_id):
         requester = await self.auth.get_user_by_req(request)
         requester_user_id = requester.user.to_string()
@@ -651,7 +697,7 @@ class PublicisedGroupsForUserServlet(RestServlet):
     PATTERNS = client_patterns("/publicised_groups/(?P<user_id>[^/]*)$")
 
     def __init__(self, hs):
-        super(PublicisedGroupsForUserServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.store = hs.get_datastore()
@@ -672,7 +718,7 @@ class PublicisedGroupsForUsersServlet(RestServlet):
     PATTERNS = client_patterns("/publicised_groups$")
 
     def __init__(self, hs):
-        super(PublicisedGroupsForUsersServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.store = hs.get_datastore()
@@ -696,7 +742,7 @@ class GroupsForUserServlet(RestServlet):
     PATTERNS = client_patterns("/joined_groups$")
 
     def __init__(self, hs):
-        super(GroupsForUserServlet, self).__init__()
+        super().__init__()
         self.auth = hs.get_auth()
         self.clock = hs.get_clock()
         self.groups_handler = hs.get_groups_local_handler()

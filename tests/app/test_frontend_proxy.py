@@ -15,6 +15,7 @@
 
 from synapse.app.generic_worker import GenericWorkerServer
 
+from tests.server import make_request
 from tests.unittest import HomeserverTestCase
 
 
@@ -22,7 +23,7 @@ class FrontendProxyTests(HomeserverTestCase):
     def make_homeserver(self, reactor, clock):
 
         hs = self.setup_test_homeserver(
-            http_client=None, homeserverToUse=GenericWorkerServer
+            federation_http_client=None, homeserver_to_use=GenericWorkerServer
         )
 
         return hs
@@ -30,6 +31,16 @@ class FrontendProxyTests(HomeserverTestCase):
     def default_config(self):
         c = super().default_config()
         c["worker_app"] = "synapse.app.frontend_proxy"
+
+        c["worker_listeners"] = [
+            {
+                "type": "http",
+                "port": 8080,
+                "bind_addresses": ["0.0.0.0"],
+                "resources": [{"names": ["client"]}],
+            }
+        ]
+
         return c
 
     def test_listen_http_with_presence_enabled(self):
@@ -39,22 +50,14 @@ class FrontendProxyTests(HomeserverTestCase):
         # Presence is on
         self.hs.config.use_presence = True
 
-        config = {
-            "port": 8080,
-            "bind_addresses": ["0.0.0.0"],
-            "resources": [{"names": ["client"]}],
-        }
-
         # Listen with the config
-        self.hs._listen_http(config)
+        self.hs._listen_http(self.hs.config.worker.worker_listeners[0])
 
         # Grab the resource from the site that was told to listen
         self.assertEqual(len(self.reactor.tcpServers), 1)
         site = self.reactor.tcpServers[0][1]
-        self.resource = site.resource.children[b"_matrix"].children[b"client"]
 
-        request, channel = self.make_request("PUT", "presence/a/status")
-        self.render(request)
+        channel = make_request(self.reactor, site, "PUT", "presence/a/status")
 
         # 400 + unrecognised, because nothing is registered
         self.assertEqual(channel.code, 400)
@@ -67,22 +70,14 @@ class FrontendProxyTests(HomeserverTestCase):
         # Presence is off
         self.hs.config.use_presence = False
 
-        config = {
-            "port": 8080,
-            "bind_addresses": ["0.0.0.0"],
-            "resources": [{"names": ["client"]}],
-        }
-
         # Listen with the config
-        self.hs._listen_http(config)
+        self.hs._listen_http(self.hs.config.worker.worker_listeners[0])
 
         # Grab the resource from the site that was told to listen
         self.assertEqual(len(self.reactor.tcpServers), 1)
         site = self.reactor.tcpServers[0][1]
-        self.resource = site.resource.children[b"_matrix"].children[b"client"]
 
-        request, channel = self.make_request("PUT", "presence/a/status")
-        self.render(request)
+        channel = make_request(self.reactor, site, "PUT", "presence/a/status")
 
         # 401, because the stub servlet still checks authentication
         self.assertEqual(channel.code, 401)

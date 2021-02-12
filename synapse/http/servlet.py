@@ -17,9 +17,8 @@
 
 import logging
 
-from canonicaljson import json
-
 from synapse.api.errors import Codes, SynapseError
+from synapse.util import json_decoder
 
 logger = logging.getLogger(__name__)
 
@@ -214,16 +213,8 @@ def parse_json_value_from_request(request, allow_empty_body=False):
     if not content_bytes and allow_empty_body:
         return None
 
-    # Decode to Unicode so that simplejson will return Unicode strings on
-    # Python 2
     try:
-        content_unicode = content_bytes.decode("utf8")
-    except UnicodeDecodeError:
-        logger.warning("Unable to decode UTF-8")
-        raise SynapseError(400, "Content not JSON.", errcode=Codes.NOT_JSON)
-
-    try:
-        content = json.loads(content_unicode)
+        content = json_decoder.decode(content_bytes.decode("utf-8"))
     except Exception as e:
         logger.warning("Unable to parse JSON: %s", e)
         raise SynapseError(400, "Content not JSON.", errcode=Codes.NOT_JSON)
@@ -265,7 +256,7 @@ def assert_params_in_dict(body, required):
         raise SynapseError(400, "Missing params: %r" % absent, Codes.MISSING_PARAM)
 
 
-class RestServlet(object):
+class RestServlet:
 
     """ A Synapse REST Servlet.
 
@@ -281,7 +272,6 @@ class RestServlet(object):
       on_PUT
       on_POST
       on_DELETE
-      on_OPTIONS
 
     Automatically handles turning CodeMessageExceptions thrown by these methods
     into the appropriate HTTP response.
@@ -292,7 +282,7 @@ class RestServlet(object):
         if hasattr(self, "PATTERNS"):
             patterns = self.PATTERNS
 
-            for method in ("GET", "PUT", "POST", "OPTIONS", "DELETE"):
+            for method in ("GET", "PUT", "POST", "DELETE"):
                 if hasattr(self, "on_%s" % (method,)):
                     servlet_classname = self.__class__.__name__
                     method_handler = getattr(self, "on_%s" % (method,))

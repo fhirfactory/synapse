@@ -16,7 +16,7 @@
 
 """Tests REST events for /rooms paths."""
 
-from mock import Mock, NonCallableMock
+from mock import Mock
 
 from twisted.internet import defer
 
@@ -39,20 +39,14 @@ class RoomTypingTestCase(unittest.HomeserverTestCase):
     def make_homeserver(self, reactor, clock):
 
         hs = self.setup_test_homeserver(
-            "red",
-            http_client=None,
-            federation_client=Mock(),
-            ratelimiter=NonCallableMock(spec_set=["can_do_action"]),
+            "red", federation_http_client=None, federation_client=Mock(),
         )
 
         self.event_source = hs.get_event_sources().sources["typing"]
 
-        self.ratelimiter = hs.get_ratelimiter()
-        self.ratelimiter.can_do_action.return_value = (True, 0)
+        hs.get_federation_handler = Mock()
 
-        hs.get_handlers().federation_handler = Mock()
-
-        def get_user_by_access_token(token=None, allow_guest=False):
+        async def get_user_by_access_token(token=None, allow_guest=False):
             return {
                 "user": UserID.from_string(self.auth_user_id),
                 "token_id": 1,
@@ -61,8 +55,8 @@ class RoomTypingTestCase(unittest.HomeserverTestCase):
 
         hs.get_auth().get_user_by_access_token = get_user_by_access_token
 
-        def _insert_client_ip(*args, **kwargs):
-            return defer.succeed(None)
+        async def _insert_client_ip(*args, **kwargs):
+            return None
 
         hs.get_datastore().insert_client_ip = _insert_client_ip
 
@@ -100,12 +94,11 @@ class RoomTypingTestCase(unittest.HomeserverTestCase):
         self.helper.join(self.room_id, user="@jim:red")
 
     def test_set_typing(self):
-        request, channel = self.make_request(
+        channel = self.make_request(
             "PUT",
             "/rooms/%s/typing/%s" % (self.room_id, self.user_id),
             b'{"typing": true, "timeout": 30000}',
         )
-        self.render(request)
         self.assertEquals(200, channel.code)
 
         self.assertEquals(self.event_source.get_current_key(), 1)
@@ -124,21 +117,19 @@ class RoomTypingTestCase(unittest.HomeserverTestCase):
         )
 
     def test_set_not_typing(self):
-        request, channel = self.make_request(
+        channel = self.make_request(
             "PUT",
             "/rooms/%s/typing/%s" % (self.room_id, self.user_id),
             b'{"typing": false}',
         )
-        self.render(request)
         self.assertEquals(200, channel.code)
 
     def test_typing_timeout(self):
-        request, channel = self.make_request(
+        channel = self.make_request(
             "PUT",
             "/rooms/%s/typing/%s" % (self.room_id, self.user_id),
             b'{"typing": true, "timeout": 30000}',
         )
-        self.render(request)
         self.assertEquals(200, channel.code)
 
         self.assertEquals(self.event_source.get_current_key(), 1)
@@ -147,12 +138,11 @@ class RoomTypingTestCase(unittest.HomeserverTestCase):
 
         self.assertEquals(self.event_source.get_current_key(), 2)
 
-        request, channel = self.make_request(
+        channel = self.make_request(
             "PUT",
             "/rooms/%s/typing/%s" % (self.room_id, self.user_id),
             b'{"typing": true, "timeout": 30000}',
         )
-        self.render(request)
         self.assertEquals(200, channel.code)
 
         self.assertEquals(self.event_source.get_current_key(), 3)

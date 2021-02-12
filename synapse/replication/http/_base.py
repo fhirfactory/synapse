@@ -16,32 +16,34 @@
 import abc
 import logging
 import re
+import urllib
 from inspect import signature
 from typing import Dict, List, Tuple
 
-from six import raise_from
-from six.moves import urllib
+from prometheus_client import Counter, Gauge
 
-from twisted.internet import defer
-
-from synapse.api.errors import (
-    CodeMessageException,
-    HttpResponseException,
-    RequestSendFailed,
-    SynapseError,
-)
-from synapse.logging.opentracing import (
-    inject_active_span_byte_dict,
-    trace,
-    trace_servlet,
-)
+from synapse.api.errors import HttpResponseException, SynapseError
+from synapse.http import RequestTimedOutError
+from synapse.logging.opentracing import inject_active_span_byte_dict, trace
 from synapse.util.caches.response_cache import ResponseCache
 from synapse.util.stringutils import random_string
 
 logger = logging.getLogger(__name__)
 
+_pending_outgoing_requests = Gauge(
+    "synapse_pending_outgoing_replication_requests",
+    "Number of active outgoing replication requests, by replication method name",
+    ["name"],
+)
 
-class ReplicationEndpoint(object):
+_outgoing_request_counter = Counter(
+    "synapse_outgoing_replication_requests",
+    "Number of outgoing replication requests, by replication method name and result",
+    ["name", "code"],
+)
+
+
+class ReplicationEndpoint(metaclass=abc.ABCMeta):
     """Helper base class for defining new replication HTTP endpoints.
 
     This creates an endpoint under `/_synapse/replication/:NAME/:PATH_ARGS..`
@@ -80,8 +82,6 @@ class ReplicationEndpoint(object):
             is received.
     """
 
-    __metaclass__ = abc.ABCMeta
-
     NAME = abc.abstractproperty()  # type: str  # type: ignore
     PATH_ARGS = abc.abstractproperty()  # type: Tuple[str, ...]  # type: ignore
     METHOD = "POST"
@@ -92,22 +92,41 @@ class ReplicationEndpoint(object):
         if self.CACHE:
             self.response_cache = ResponseCache(
                 hs, "repl." + self.NAME, timeout_ms=30 * 60 * 1000
-            )
+            )  # type: ResponseCache[str]
 
         # We reserve `instance_name` as a parameter to sending requests, so we
         # assert here that sub classes don't try and use the name.
         assert (
             "instance_name" not in self.PATH_ARGS
-        ), "`instance_name` is a reserved paramater name"
+        ), "`instance_name` is a reserved parameter name"
         assert (
             "instance_name"
             not in signature(self.__class__._serialize_payload).parameters
-        ), "`instance_name` is a reserved paramater name"
+        ), "`instance_name` is a reserved parameter name"
 
         assert self.METHOD in ("PUT", "POST", "GET")
 
+        self._replication_secret = None
+        if hs.config.worker.worker_replication_secret:
+            self._replication_secret = hs.config.worker.worker_replication_secret
+
+    def _check_auth(self, request) -> None:
+        # Get the authorization header.
+        auth_headers = request.requestHeaders.getRawHeaders(b"Authorization")
+
+        if len(auth_headers) > 1:
+            raise RuntimeError("Too many Authorization headers.")
+        parts = auth_headers[0].split(b" ")
+        if parts[0] == b"Bearer" and len(parts) == 2:
+            received_secret = parts[1].decode("ascii")
+            if self._replication_secret == received_secret:
+                # Success!
+                return
+
+        raise RuntimeError("Invalid Authorization header.")
+
     @abc.abstractmethod
-    def _serialize_payload(**kwargs):
+    async def _serialize_payload(**kwargs):
         """Static method that is called when creating a request.
 
         Concrete implementations should have explicit parameters (rather than
@@ -116,9 +135,8 @@ class ReplicationEndpoint(object):
         argument list.
 
         Returns:
-            Deferred[dict]|dict: If POST/PUT request then dictionary must be
-            JSON serialisable, otherwise must be appropriate for adding as
-            query args.
+            dict: If POST/PUT request then dictionary must be JSON serialisable,
+            otherwise must be appropriate for adding as query args.
         """
         return {}
 
@@ -149,9 +167,17 @@ class ReplicationEndpoint(object):
 
         instance_map = hs.config.worker.instance_map
 
+        outgoing_gauge = _pending_outgoing_requests.labels(cls.NAME)
+
+        replication_secret = None
+        if hs.config.worker.worker_replication_secret:
+            replication_secret = hs.config.worker.worker_replication_secret.encode(
+                "ascii"
+            )
+
         @trace(opname="outgoing_replication_request")
-        @defer.inlineCallbacks
-        def send_request(instance_name="master", **kwargs):
+        @outgoing_gauge.track_inprogress()
+        async def send_request(*, instance_name="master", **kwargs):
             if instance_name == local_instance_name:
                 raise Exception("Trying to send HTTP request to self")
             if instance_name == "master":
@@ -165,7 +191,7 @@ class ReplicationEndpoint(object):
                     "Instance %r not in 'instance_map' config" % (instance_name,)
                 )
 
-            data = yield cls._serialize_payload(**kwargs)
+            data = await cls._serialize_payload(**kwargs)
 
             url_args = [
                 urllib.parse.quote(kwargs[name], safe="") for name in cls.PATH_ARGS
@@ -201,27 +227,33 @@ class ReplicationEndpoint(object):
                 # the master, and so whether we should clean up or not.
                 while True:
                     headers = {}  # type: Dict[bytes, List[bytes]]
+                    # Add an authorization header, if configured.
+                    if replication_secret:
+                        headers[b"Authorization"] = [b"Bearer " + replication_secret]
                     inject_active_span_byte_dict(headers, None, check_destination=False)
                     try:
-                        result = yield request_func(uri, data, headers=headers)
+                        result = await request_func(uri, data, headers=headers)
                         break
-                    except CodeMessageException as e:
-                        if e.code != 504 or not cls.RETRY_ON_TIMEOUT:
+                    except RequestTimedOutError:
+                        if not cls.RETRY_ON_TIMEOUT:
                             raise
 
-                    logger.warning("%s request timed out", cls.NAME)
+                    logger.warning("%s request timed out; retrying", cls.NAME)
 
                     # If we timed out we probably don't need to worry about backing
                     # off too much, but lets just wait a little anyway.
-                    yield clock.sleep(1)
+                    await clock.sleep(1)
             except HttpResponseException as e:
                 # We convert to SynapseError as we know that it was a SynapseError
-                # on the master process that we should send to the client. (And
+                # on the main process that we should send to the client. (And
                 # importantly, not stack traces everywhere)
+                _outgoing_request_counter.labels(cls.NAME, e.code).inc()
                 raise e.to_synapse_error()
-            except RequestSendFailed as e:
-                raise_from(SynapseError(502, "Failed to talk to master"), e)
+            except Exception as e:
+                _outgoing_request_counter.labels(cls.NAME, "ERR").inc()
+                raise SynapseError(502, "Failed to talk to main process") from e
 
+            _outgoing_request_counter.labels(cls.NAME, 200).inc()
             return result
 
         return send_request
@@ -232,24 +264,19 @@ class ReplicationEndpoint(object):
         """
 
         url_args = list(self.PATH_ARGS)
-        handler = self._handle_request
         method = self.METHOD
 
         if self.CACHE:
-            handler = self._cached_handler  # type: ignore
             url_args.append("txn_id")
 
         args = "/".join("(?P<%s>[^/]+)" % (arg,) for arg in url_args)
         pattern = re.compile("^/_synapse/replication/%s/%s$" % (self.NAME, args))
 
-        handler = trace_servlet(self.__class__.__name__, extract_context=True)(handler)
-        # We don't let register paths trace this servlet using the default tracing
-        # options because we wish to extract the context explicitly.
         http_server.register_paths(
-            method, [pattern], handler, self.__class__.__name__, trace=False
+            method, [pattern], self._check_auth_and_handle, self.__class__.__name__,
         )
 
-    def _cached_handler(self, request, txn_id, **kwargs):
+    def _check_auth_and_handle(self, request, **kwargs):
         """Called on new incoming requests when caching is enabled. Checks
         if there is a cached response for the request and returns that,
         otherwise calls `_handle_request` and caches its response.
@@ -257,6 +284,15 @@ class ReplicationEndpoint(object):
         # We just use the txn_id here, but we probably also want to use the
         # other PATH_ARGS as well.
 
-        assert self.CACHE
+        # Check the authorization headers before handling the request.
+        if self._replication_secret:
+            self._check_auth(request)
 
-        return self.response_cache.wrap(txn_id, self._handle_request, request, **kwargs)
+        if self.CACHE:
+            txn_id = kwargs.pop("txn_id")
+
+            return self.response_cache.wrap(
+                txn_id, self._handle_request, request, **kwargs
+            )
+
+        return self._handle_request(request, **kwargs)

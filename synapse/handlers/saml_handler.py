@@ -14,7 +14,7 @@
 # limitations under the License.
 import logging
 import re
-from typing import Callable, Dict, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Set, Tuple
 
 import attr
 import saml2
@@ -23,23 +23,26 @@ from saml2.client import Saml2Client
 
 from synapse.api.errors import SynapseError
 from synapse.config import ConfigError
-from synapse.http.server import finish_request
+from synapse.config.saml2_config import SamlAttributeRequirement
+from synapse.handlers._base import BaseHandler
+from synapse.handlers.sso import MappingException, UserAttributes
 from synapse.http.servlet import parse_string
 from synapse.http.site import SynapseRequest
 from synapse.module_api import ModuleApi
-from synapse.module_api.errors import RedirectException
 from synapse.types import (
     UserID,
     map_username_to_mxid_localpart,
     mxid_localpart_allowed_characters,
 )
-from synapse.util.async_helpers import Linearizer
 from synapse.util.iterutils import chunk_seq
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
 
-@attr.s
+@attr.s(slots=True)
 class Saml2SessionData:
     """Data we track about SAML2 sessions"""
 
@@ -50,20 +53,18 @@ class Saml2SessionData:
     ui_auth_session_id = attr.ib(type=Optional[str], default=None)
 
 
-class SamlHandler:
-    def __init__(self, hs):
+class SamlHandler(BaseHandler):
+    def __init__(self, hs: "HomeServer"):
+        super().__init__(hs)
         self._saml_client = Saml2Client(hs.config.saml2_sp_config)
-        self._auth = hs.get_auth()
-        self._auth_handler = hs.get_auth_handler()
-        self._registration_handler = hs.get_registration_handler()
+        self._saml_idp_entityid = hs.config.saml2_idp_entityid
 
-        self._clock = hs.get_clock()
-        self._datastore = hs.get_datastore()
-        self._hostname = hs.hostname
         self._saml2_session_lifetime = hs.config.saml2_session_lifetime
         self._grandfathered_mxid_source_attribute = (
             hs.config.saml2_grandfathered_mxid_source_attribute
         )
+        self._saml2_attribute_requirements = hs.config.saml2.attribute_requirements
+        self._error_template = hs.config.sso_error_template
 
         # plugin to do custom mapping from saml response to mxid
         self._user_mapping_provider = hs.config.saml2_user_mapping_provider_class(
@@ -72,35 +73,53 @@ class SamlHandler:
         )
 
         # identifier for the external_ids table
-        self._auth_provider_id = "saml"
+        self.idp_id = "saml"
+
+        # user-facing name of this auth provider
+        self.idp_name = "SAML"
+
+        # we do not currently support icons for SAML auth, but this is required by
+        # the SsoIdentityProvider protocol type.
+        self.idp_icon = None
 
         # a map from saml session id to Saml2SessionData object
-        self._outstanding_requests_dict = {}
+        self._outstanding_requests_dict = {}  # type: Dict[str, Saml2SessionData]
 
-        # a lock on the mappings
-        self._mapping_lock = Linearizer(name="saml_mapping", clock=self._clock)
+        self._sso_handler = hs.get_sso_handler()
+        self._sso_handler.register_identity_provider(self)
 
-        self._error_html_content = hs.config.saml2_error_html_content
-
-    def handle_redirect_request(
-        self, client_redirect_url: bytes, ui_auth_session_id: Optional[str] = None
-    ) -> bytes:
+    async def handle_redirect_request(
+        self,
+        request: SynapseRequest,
+        client_redirect_url: Optional[bytes],
+        ui_auth_session_id: Optional[str] = None,
+    ) -> str:
         """Handle an incoming request to /login/sso/redirect
 
         Args:
+            request: the incoming HTTP request
             client_redirect_url: the URL that we should redirect the
-                client to when everything is done
+                client to after login (or None for UI Auth).
             ui_auth_session_id: The session ID of the ongoing UI Auth (or
                 None if this is a login).
 
         Returns:
             URL to redirect to
         """
+        if not client_redirect_url:
+            # Some SAML identity providers (e.g. Google) require a
+            # RelayState parameter on requests, so pass in a dummy redirect URL
+            # (which will never get used).
+            client_redirect_url = b"unused"
+
         reqid, info = self._saml_client.prepare_for_authenticate(
-            relay_state=client_redirect_url
+            entityid=self._saml_idp_entityid, relay_state=client_redirect_url
         )
 
-        now = self._clock.time_msec()
+        # Since SAML sessions timeout it is useful to log when they were created.
+        logger.info("Initiating a new SAML session: %s" % (reqid,))
+
+        now = self.clock.time_msec()
         self._outstanding_requests_dict[reqid] = Saml2SessionData(
             creation_time=now, ui_auth_session_id=ui_auth_session_id,
         )
@@ -130,63 +149,59 @@ class SamlHandler:
         self.expire_sessions()
 
         try:
-            user_id, current_session = await self._map_saml_response_to_user(
-                resp_bytes, relay_state
-            )
-        except RedirectException:
-            # Raise the exception as per the wishes of the SAML module response
-            raise
-        except Exception as e:
-            # If decoding the response or mapping it to a user failed, then log the
-            # error and tell the user that something went wrong.
-            logger.error(e)
-
-            request.setResponseCode(400)
-            request.setHeader(b"Content-Type", b"text/html; charset=utf-8")
-            request.setHeader(
-                b"Content-Length", b"%d" % (len(self._error_html_content),)
-            )
-            request.write(self._error_html_content.encode("utf8"))
-            finish_request(request)
-            return
-
-        # Complete the interactive auth session or the login.
-        if current_session and current_session.ui_auth_session_id:
-            await self._auth_handler.complete_sso_ui_auth(
-                user_id, current_session.ui_auth_session_id, request
-            )
-
-        else:
-            await self._auth_handler.complete_sso_login(user_id, request, relay_state)
-
-    async def _map_saml_response_to_user(
-        self, resp_bytes: str, client_redirect_url: str
-    ) -> Tuple[str, Optional[Saml2SessionData]]:
-        """
-        Given a sample response, retrieve the cached session and user for it.
-
-        Args:
-            resp_bytes: The SAML response.
-            client_redirect_url: The redirect URL passed in by the client.
-
-        Returns:
-             Tuple of the user ID and SAML session associated with this response.
-        """
-        try:
             saml2_auth = self._saml_client.parse_authn_request_response(
                 resp_bytes,
                 saml2.BINDING_HTTP_POST,
                 outstanding=self._outstanding_requests_dict,
             )
+        except saml2.response.UnsolicitedResponse as e:
+            # the pysaml2 library helpfully logs an ERROR here, but neglects to log
+            # the session ID. I don't really want to put the full text of the exception
+            # in the (user-visible) exception message, so let's log the exception here
+            # so we can track down the session IDs later.
+            logger.warning(str(e))
+            self._sso_handler.render_error(
+                request, "unsolicited_response", "Unexpected SAML2 login."
+            )
+            return
         except Exception as e:
-            logger.warning("Exception parsing SAML2 response: %s", e)
-            raise SynapseError(400, "Unable to parse SAML2 response: %s" % (e,))
+            self._sso_handler.render_error(
+                request,
+                "invalid_response",
+                "Unable to parse SAML2 response: %s." % (e,),
+            )
+            return
 
         if saml2_auth.not_signed:
-            logger.warning("SAML2 response was not signed")
-            raise SynapseError(400, "SAML2 response was not signed")
+            self._sso_handler.render_error(
+                request, "unsigned_respond", "SAML2 response was not signed."
+            )
+            return
 
         logger.debug("SAML2 response: %s", saml2_auth.origxml)
+
+        await self._handle_authn_response(request, saml2_auth, relay_state)
+
+    async def _handle_authn_response(
+        self,
+        request: SynapseRequest,
+        saml2_auth: saml2.response.AuthnResponse,
+        relay_state: str,
+    ) -> None:
+        """Handle an AuthnResponse, having parsed it from the request params
+
+        Assumes that the signature on the response object has been checked. Maps
+        the user onto an MXID, registering them if necessary, and returns a response
+        to the browser.
+
+        Args:
+            request: the incoming request from the browser. We'll respond to it with an
+                HTML page or a redirect
+            saml2_auth: the parsed AuthnResponse object
+            relay_state: the RelayState query param, which encodes the URI to rediret
+               back to
+        """
+
         for assertion in saml2_auth.assertions:
             # kibana limits the length of a log field, whereas this is all rather
             # useful, so split it up.
@@ -203,27 +218,86 @@ class SamlHandler:
             saml2_auth.in_response_to, None
         )
 
-        remote_user_id = self._user_mapping_provider.get_remote_user_id(
+        # first check if we're doing a UIA
+        if current_session and current_session.ui_auth_session_id:
+            try:
+                remote_user_id = self._remote_id_from_saml_response(saml2_auth, None)
+            except MappingException as e:
+                logger.exception("Failed to extract remote user id from SAML response")
+                self._sso_handler.render_error(request, "mapping_error", str(e))
+                return
+
+            return await self._sso_handler.complete_sso_ui_auth_request(
+                self.idp_id,
+                remote_user_id,
+                current_session.ui_auth_session_id,
+                request,
+            )
+
+        # otherwise, we're handling a login request.
+
+        # Ensure that the attributes of the logged in user meet the required
+        # attributes.
+        for requirement in self._saml2_attribute_requirements:
+            if not _check_attribute_requirement(saml2_auth.ava, requirement):
+                self._sso_handler.render_error(
+                    request, "unauthorised", "You are not authorised to log in here."
+                )
+                return
+
+        # Call the mapper to register/login the user
+        try:
+            await self._complete_saml_login(saml2_auth, request, relay_state)
+        except MappingException as e:
+            logger.exception("Could not map user")
+            self._sso_handler.render_error(request, "mapping_error", str(e))
+
+    async def _complete_saml_login(
+        self,
+        saml2_auth: saml2.response.AuthnResponse,
+        request: SynapseRequest,
+        client_redirect_url: str,
+    ) -> None:
+        """
+        Given a SAML response, complete the login flow
+
+        Retrieves the remote user ID, registers the user if necessary, and serves
+        a redirect back to the client with a login-token.
+
+        Args:
+            saml2_auth: The parsed SAML2 response.
+            request: The request to respond to
+            client_redirect_url: The redirect URL passed in by the client.
+
+        Raises:
+            MappingException if there was a problem mapping the response to a user.
+            RedirectException: some mapping providers may raise this if they need
+                to redirect to an interstitial page.
+        """
+        remote_user_id = self._remote_id_from_saml_response(
             saml2_auth, client_redirect_url
         )
 
-        if not remote_user_id:
-            raise Exception("Failed to extract remote user id from SAML response")
+        async def saml_response_to_remapped_user_attributes(
+            failures: int,
+        ) -> UserAttributes:
+            """
+            Call the mapping provider to map a SAML response to user attributes and coerce the result into the standard form.
 
-        with (await self._mapping_lock.queue(self._auth_provider_id)):
-            # first of all, check if we already have a mapping for this user
-            logger.info(
-                "Looking for existing mapping for user %s:%s",
-                self._auth_provider_id,
-                remote_user_id,
+            This is backwards compatibility for abstraction for the SSO handler.
+            """
+            # Call the mapping provider.
+            result = self._user_mapping_provider.saml_response_to_user_attributes(
+                saml2_auth, failures, client_redirect_url
             )
-            registered_user_id = await self._datastore.get_user_by_external_id(
-                self._auth_provider_id, remote_user_id
+            # Remap some of the results.
+            return UserAttributes(
+                localpart=result.get("mxid_localpart"),
+                display_name=result.get("displayname"),
+                emails=result.get("emails", []),
             )
-            if registered_user_id is not None:
-                logger.info("Found existing mapping %s", registered_user_id)
-                return registered_user_id, current_session
 
+        async def grandfather_existing_users() -> Optional[str]:
             # backwards-compatibility hack: see if there is an existing user with a
             # suitable mapping from the uid
             if (
@@ -232,72 +306,63 @@ class SamlHandler:
             ):
                 attrval = saml2_auth.ava[self._grandfathered_mxid_source_attribute][0]
                 user_id = UserID(
-                    map_username_to_mxid_localpart(attrval), self._hostname
+                    map_username_to_mxid_localpart(attrval), self.server_name
                 ).to_string()
-                logger.info(
+
+                logger.debug(
                     "Looking for existing account based on mapped %s %s",
                     self._grandfathered_mxid_source_attribute,
                     user_id,
                 )
 
-                users = await self._datastore.get_users_by_id_case_insensitive(user_id)
+                users = await self.store.get_users_by_id_case_insensitive(user_id)
                 if users:
                     registered_user_id = list(users.keys())[0]
                     logger.info("Grandfathering mapping to %s", registered_user_id)
-                    await self._datastore.record_user_external_id(
-                        self._auth_provider_id, remote_user_id, registered_user_id
-                    )
-                    return registered_user_id, current_session
+                    return registered_user_id
 
-            # Map saml response to user attributes using the configured mapping provider
-            for i in range(1000):
-                attribute_dict = self._user_mapping_provider.saml_response_to_user_attributes(
-                    saml2_auth, i, client_redirect_url=client_redirect_url,
-                )
+            return None
 
-                logger.debug(
-                    "Retrieved SAML attributes from user mapping provider: %s "
-                    "(attempt %d)",
-                    attribute_dict,
-                    i,
-                )
+        await self._sso_handler.complete_sso_login_request(
+            self.idp_id,
+            remote_user_id,
+            request,
+            client_redirect_url,
+            saml_response_to_remapped_user_attributes,
+            grandfather_existing_users,
+        )
 
-                localpart = attribute_dict.get("mxid_localpart")
-                if not localpart:
-                    logger.error(
-                        "SAML mapping provider plugin did not return a "
-                        "mxid_localpart object"
-                    )
-                    raise SynapseError(500, "Error parsing SAML2 response")
+    def _remote_id_from_saml_response(
+        self,
+        saml2_auth: saml2.response.AuthnResponse,
+        client_redirect_url: Optional[str],
+    ) -> str:
+        """Extract the unique remote id from a SAML2 AuthnResponse
 
-                displayname = attribute_dict.get("displayname")
+        Args:
+            saml2_auth: The parsed SAML2 response.
+            client_redirect_url: The redirect URL passed in by the client.
+        Returns:
+            remote user id
 
-                # Check if this mxid already exists
-                if not await self._datastore.get_users_by_id_case_insensitive(
-                    UserID(localpart, self._hostname).to_string()
-                ):
-                    # This mxid is free
-                    break
-            else:
-                # Unable to generate a username in 1000 iterations
-                # Break and return error to the user
-                raise SynapseError(
-                    500, "Unable to generate a Matrix ID from the SAML response"
-                )
+        Raises:
+            MappingException if there was an error extracting the user id
+        """
+        # It's not obvious why we need to pass in the redirect URI to the mapping
+        # provider, but we do :/
+        remote_user_id = self._user_mapping_provider.get_remote_user_id(
+            saml2_auth, client_redirect_url
+        )
 
-            logger.info("Mapped SAML user to local part %s", localpart)
-
-            registered_user_id = await self._registration_handler.register_user(
-                localpart=localpart, default_display_name=displayname
+        if not remote_user_id:
+            raise MappingException(
+                "Failed to extract remote user id from SAML response"
             )
 
-            await self._datastore.record_user_external_id(
-                self._auth_provider_id, remote_user_id, registered_user_id
-            )
-            return registered_user_id, current_session
+        return remote_user_id
 
     def expire_sessions(self):
-        expire_before = self._clock.time_msec() - self._saml2_session_lifetime
+        expire_before = self.clock.time_msec() - self._saml2_session_lifetime
         to_expire = set()
         for reqid, data in self._outstanding_requests_dict.items():
             if data.creation_time < expire_before:
@@ -305,6 +370,21 @@ class SamlHandler:
         for reqid in to_expire:
             logger.debug("Expiring session id %s", reqid)
             del self._outstanding_requests_dict[reqid]
+
+
+def _check_attribute_requirement(ava: dict, req: SamlAttributeRequirement) -> bool:
+    values = ava.get(req.attribute, [])
+    for v in values:
+        if v == req.value:
+            return True
+
+    logger.info(
+        "SAML2 attribute %s did not match required value '%s' (was '%s')",
+        req.attribute,
+        req.value,
+        values,
+    )
+    return False
 
 
 DOT_REPLACE_PATTERN = re.compile(
@@ -329,12 +409,12 @@ MXID_MAPPER_MAP = {
 
 
 @attr.s
-class SamlConfig(object):
+class SamlConfig:
     mxid_source_attribute = attr.ib()
     mxid_mapper = attr.ib()
 
 
-class DefaultSamlMappingProvider(object):
+class DefaultSamlMappingProvider:
     __version__ = "0.0.1"
 
     def __init__(self, parsed_config: SamlConfig, module_api: ModuleApi):
@@ -359,7 +439,7 @@ class DefaultSamlMappingProvider(object):
             return saml_response.ava["uid"][0]
         except KeyError:
             logger.warning("SAML2 response lacks a 'uid' attestation")
-            raise SynapseError(400, "'uid' not in SAML2 response")
+            raise MappingException("'uid' not in SAML2 response")
 
     def saml_response_to_user_attributes(
         self,
@@ -381,6 +461,7 @@ class DefaultSamlMappingProvider(object):
             dict: A dict containing new user attributes. Possible keys:
                 * mxid_localpart (str): Required. The localpart of the user's mxid
                 * displayname (str): The displayname of the user
+                * emails (list[str]): Any emails for the user
         """
         try:
             mxid_source = saml_response.ava[self._mxid_source_attribute][0]
@@ -393,19 +474,23 @@ class DefaultSamlMappingProvider(object):
             )
 
         # Use the configured mapper for this mxid_source
-        base_mxid_localpart = self._mxid_mapper(mxid_source)
+        localpart = self._mxid_mapper(mxid_source)
 
         # Append suffix integer if last call to this function failed to produce
-        # a usable mxid
-        localpart = base_mxid_localpart + (str(failures) if failures else "")
+        # a usable mxid.
+        localpart += str(failures) if failures else ""
 
         # Retrieve the display name from the saml response
         # If displayname is None, the mxid_localpart will be used instead
         displayname = saml_response.ava.get("displayName", [None])[0]
 
+        # Retrieve any emails present in the saml response
+        emails = saml_response.ava.get("email", [])
+
         return {
             "mxid_localpart": localpart,
             "displayname": displayname,
+            "emails": emails,
         }
 
     @staticmethod
@@ -444,4 +529,4 @@ class DefaultSamlMappingProvider(object):
                 second set consists of those attributes which can be used if
                 available, but are not necessary
         """
-        return {"uid", config.mxid_source_attribute}, {"displayName"}
+        return {"uid", config.mxid_source_attribute}, {"displayName", "email"}

@@ -39,13 +39,20 @@ class ProxyAgent(_AgentBase):
         reactor: twisted reactor to place outgoing
             connections.
 
+        proxy_reactor: twisted reactor to use for connections to the proxy server
+                       reactor might have some blacklisting applied (i.e. for DNS queries),
+                       but we need unblocked access to the proxy.
+
         contextFactory (IPolicyForHTTPS): A factory for TLS contexts, to control the
             verification parameters of OpenSSL.  The default is to use a
             `BrowserLikePolicyForHTTPS`, so unless you have special
             requirements you can leave this as-is.
 
-        connectTimeout (float): The amount of time that this Agent will wait
-            for the peer to accept a connection.
+        connectTimeout (Optional[float]): The amount of time that this Agent will wait
+            for the peer to accept a connection, in seconds. If 'None',
+            HostnameEndpoint's default (30s) will be used.
+
+            This is used for connections to both proxies and destination servers.
 
         bindAddress (bytes): The local address for client sockets to bind to.
 
@@ -56,6 +63,7 @@ class ProxyAgent(_AgentBase):
     def __init__(
         self,
         reactor,
+        proxy_reactor=None,
         contextFactory=BrowserLikePolicyForHTTPS(),
         connectTimeout=None,
         bindAddress=None,
@@ -65,6 +73,11 @@ class ProxyAgent(_AgentBase):
     ):
         _AgentBase.__init__(self, reactor, pool)
 
+        if proxy_reactor is None:
+            self.proxy_reactor = reactor
+        else:
+            self.proxy_reactor = proxy_reactor
+
         self._endpoint_kwargs = {}
         if connectTimeout is not None:
             self._endpoint_kwargs["timeout"] = connectTimeout
@@ -72,11 +85,11 @@ class ProxyAgent(_AgentBase):
             self._endpoint_kwargs["bindAddress"] = bindAddress
 
         self.http_proxy_endpoint = _http_proxy_endpoint(
-            http_proxy, reactor, **self._endpoint_kwargs
+            http_proxy, self.proxy_reactor, **self._endpoint_kwargs
         )
 
         self.https_proxy_endpoint = _http_proxy_endpoint(
-            https_proxy, reactor, **self._endpoint_kwargs
+            https_proxy, self.proxy_reactor, **self._endpoint_kwargs
         )
 
         self._policy_for_https = contextFactory
@@ -108,6 +121,15 @@ class ProxyAgent(_AgentBase):
         Returns:
             Deferred[IResponse]: completes when the header of the response has
                  been received (regardless of the response status code).
+
+                 Can fail with:
+                    SchemeNotSupported: if the uri is not http or https
+
+                    twisted.internet.error.TimeoutError if the server we are connecting
+                        to (proxy or destination) does not accept a connection before
+                        connectTimeout.
+
+                    ... other things too.
         """
         uri = uri.strip()
         if not _VALID_URI.match(uri):
@@ -125,7 +147,7 @@ class ProxyAgent(_AgentBase):
             request_path = uri
         elif parsed_uri.scheme == b"https" and self.https_proxy_endpoint:
             endpoint = HTTPConnectProxyEndpoint(
-                self._reactor,
+                self.proxy_reactor,
                 self.https_proxy_endpoint,
                 parsed_uri.host,
                 parsed_uri.port,

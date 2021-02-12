@@ -15,7 +15,7 @@
 
 """ Tests REST events for /events paths."""
 
-from mock import Mock, NonCallableMock
+from mock import Mock
 
 import synapse.rest.admin
 from synapse.rest.client.v1 import events, login, room
@@ -40,13 +40,9 @@ class EventStreamPermissionsTestCase(unittest.HomeserverTestCase):
         config["enable_registration"] = True
         config["auto_join_rooms"] = []
 
-        hs = self.setup_test_homeserver(
-            config=config, ratelimiter=NonCallableMock(spec_set=["can_do_action"])
-        )
-        self.ratelimiter = hs.get_ratelimiter()
-        self.ratelimiter.can_do_action.return_value = (True, 0)
+        hs = self.setup_test_homeserver(config=config)
 
-        hs.get_handlers().federation_handler = Mock()
+        hs.get_federation_handler = Mock()
 
         return hs
 
@@ -67,17 +63,15 @@ class EventStreamPermissionsTestCase(unittest.HomeserverTestCase):
         # implementation is now part of the r0 implementation, the newer
         # behaviour is used instead to be consistent with the r0 spec.
         # see issue #2602
-        request, channel = self.make_request(
+        channel = self.make_request(
             "GET", "/events?access_token=%s" % ("invalid" + self.token,)
         )
-        self.render(request)
         self.assertEquals(channel.code, 401, msg=channel.result)
 
         # valid token, expect content
-        request, channel = self.make_request(
+        channel = self.make_request(
             "GET", "/events?access_token=%s&timeout=0" % (self.token,)
         )
-        self.render(request)
         self.assertEquals(channel.code, 200, msg=channel.result)
         self.assertTrue("chunk" in channel.json_body)
         self.assertTrue("start" in channel.json_body)
@@ -93,10 +87,9 @@ class EventStreamPermissionsTestCase(unittest.HomeserverTestCase):
         )
 
         # valid token, expect content
-        request, channel = self.make_request(
+        channel = self.make_request(
             "GET", "/events?access_token=%s&timeout=0" % (self.token,)
         )
-        self.render(request)
         self.assertEquals(channel.code, 200, msg=channel.result)
 
         # We may get a presence event for ourselves down
@@ -156,8 +149,7 @@ class GetEventsTestCase(unittest.HomeserverTestCase):
         resp = self.helper.send(self.room_id, tok=self.token)
         event_id = resp["event_id"]
 
-        request, channel = self.make_request(
+        channel = self.make_request(
             "GET", "/events/" + event_id, access_token=self.token,
         )
-        self.render(request)
         self.assertEquals(channel.code, 200, msg=channel.result)

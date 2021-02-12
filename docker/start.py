@@ -120,7 +120,7 @@ def generate_config_from_template(config_dir, config_path, environ, ownership):
 
     if ownership is not None:
         subprocess.check_output(["chown", "-R", ownership, "/data"])
-        args = ["su-exec", ownership] + args
+        args = ["gosu", ownership] + args
 
     subprocess.check_output(args)
 
@@ -172,14 +172,14 @@ def run_generate_config(environ, ownership):
         # make sure that synapse has perms to write to the data dir.
         subprocess.check_output(["chown", ownership, data_dir])
 
-        args = ["su-exec", ownership] + args
-        os.execv("/sbin/su-exec", args)
+        args = ["gosu", ownership] + args
+        os.execv("/usr/sbin/gosu", args)
     else:
         os.execv("/usr/local/bin/python", args)
 
 
 def main(args, environ):
-    mode = args[1] if len(args) > 1 else None
+    mode = args[1] if len(args) > 1 else "run"
     desired_uid = int(environ.get("UID", "991"))
     desired_gid = int(environ.get("GID", "991"))
     synapse_worker = environ.get("SYNAPSE_WORKER", "synapse.app.homeserver")
@@ -189,7 +189,7 @@ def main(args, environ):
         ownership = "{}:{}".format(desired_uid, desired_gid)
 
     if ownership is None:
-        log("Will not perform chmod/su-exec as UserID already matches request")
+        log("Will not perform chmod/gosu as UserID already matches request")
 
     # In generate mode, generate a configuration and missing keys, then exit
     if mode == "generate":
@@ -205,39 +205,50 @@ def main(args, environ):
             config_dir, config_path, environ, ownership
         )
 
-    if mode is not None:
+    if mode != "run":
         error("Unknown execution mode '%s'" % (mode,))
 
-    config_dir = environ.get("SYNAPSE_CONFIG_DIR", "/data")
-    config_path = environ.get("SYNAPSE_CONFIG_PATH", config_dir + "/homeserver.yaml")
+    args = args[2:]
 
-    if not os.path.exists(config_path):
-        if "SYNAPSE_SERVER_NAME" in environ:
-            error(
-                """\
+    if "-m" not in args:
+        args = ["-m", synapse_worker] + args
+
+    # if there are no config files passed to synapse, try adding the default file
+    if not any(p.startswith("--config-path") or p.startswith("-c") for p in args):
+        config_dir = environ.get("SYNAPSE_CONFIG_DIR", "/data")
+        config_path = environ.get(
+            "SYNAPSE_CONFIG_PATH", config_dir + "/homeserver.yaml"
+        )
+
+        if not os.path.exists(config_path):
+            if "SYNAPSE_SERVER_NAME" in environ:
+                error(
+                    """\
 Config file '%s' does not exist.
 
 The synapse docker image no longer supports generating a config file on-the-fly
 based on environment variables. You can migrate to a static config file by
 running with 'migrate_config'. See the README for more details.
 """
+                    % (config_path,)
+                )
+
+            error(
+                "Config file '%s' does not exist. You should either create a new "
+                "config file by running with the `generate` argument (and then edit "
+                "the resulting file before restarting) or specify the path to an "
+                "existing config file with the SYNAPSE_CONFIG_PATH variable."
                 % (config_path,)
             )
 
-        error(
-            "Config file '%s' does not exist. You should either create a new "
-            "config file by running with the `generate` argument (and then edit "
-            "the resulting file before restarting) or specify the path to an "
-            "existing config file with the SYNAPSE_CONFIG_PATH variable."
-            % (config_path,)
-        )
+        args += ["--config-path", config_path]
 
-    log("Starting synapse with config file " + config_path)
+    log("Starting synapse with args " + " ".join(args))
 
-    args = ["python", "-m", synapse_worker, "--config-path", config_path]
+    args = ["python"] + args
     if ownership is not None:
-        args = ["su-exec", ownership] + args
-        os.execv("/sbin/su-exec", args)
+        args = ["gosu", ownership] + args
+        os.execv("/usr/sbin/gosu", args)
     else:
         os.execv("/usr/local/bin/python", args)
 

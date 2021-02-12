@@ -27,6 +27,7 @@ from synapse.server_notices.resource_limits_server_notices import (
 )
 
 from tests import unittest
+from tests.test_utils import make_awaitable
 from tests.unittest import override_config
 from tests.utils import default_config
 
@@ -66,7 +67,7 @@ class TestResourceLimitsServerNotices(unittest.HomeserverTestCase):
             raise Exception("Failed to find reference to ResourceLimitsServerNotices")
 
         self._rlsn._store.user_last_seen_monthly_active = Mock(
-            return_value=defer.succeed(1000)
+            return_value=make_awaitable(1000)
         )
         self._rlsn._server_notices_manager.send_notice = Mock(
             return_value=defer.succeed(Mock())
@@ -79,7 +80,7 @@ class TestResourceLimitsServerNotices(unittest.HomeserverTestCase):
             return_value=defer.succeed("!something:localhost")
         )
         self._rlsn._store.add_tag_to_room = Mock(return_value=defer.succeed(None))
-        self._rlsn._store.get_tags_for_room = Mock(return_value=defer.succeed({}))
+        self._rlsn._store.get_tags_for_room = Mock(return_value=make_awaitable({}))
 
     @override_config({"hs_disabled": True})
     def test_maybe_send_server_notice_disabled_hs(self):
@@ -101,7 +102,7 @@ class TestResourceLimitsServerNotices(unittest.HomeserverTestCase):
             type=EventTypes.Message, content={"msgtype": ServerNoticeMsgType}
         )
         self._rlsn._store.get_events = Mock(
-            return_value=defer.succeed({"123": mock_event})
+            return_value=make_awaitable({"123": mock_event})
         )
         self.get_success(self._rlsn.maybe_send_server_notice_to_user(self.user_id))
         # Would be better to check the content, but once == remove blocking event
@@ -119,7 +120,7 @@ class TestResourceLimitsServerNotices(unittest.HomeserverTestCase):
             type=EventTypes.Message, content={"msgtype": ServerNoticeMsgType}
         )
         self._rlsn._store.get_events = Mock(
-            return_value=defer.succeed({"123": mock_event})
+            return_value=make_awaitable({"123": mock_event})
         )
 
         self.get_success(self._rlsn.maybe_send_server_notice_to_user(self.user_id))
@@ -155,7 +156,7 @@ class TestResourceLimitsServerNotices(unittest.HomeserverTestCase):
         """
         self._rlsn._auth.check_auth_blocking = Mock(return_value=defer.succeed(None))
         self._rlsn._store.user_last_seen_monthly_active = Mock(
-            return_value=defer.succeed(None)
+            return_value=make_awaitable(None)
         )
         self.get_success(self._rlsn.maybe_send_server_notice_to_user(self.user_id))
 
@@ -214,7 +215,7 @@ class TestResourceLimitsServerNotices(unittest.HomeserverTestCase):
             type=EventTypes.Message, content={"msgtype": ServerNoticeMsgType}
         )
         self._rlsn._store.get_events = Mock(
-            return_value=defer.succeed({"123": mock_event})
+            return_value=make_awaitable({"123": mock_event})
         )
         self.get_success(self._rlsn.maybe_send_server_notice_to_user(self.user_id))
 
@@ -258,10 +259,10 @@ class TestResourceLimitsServerNoticesWithRealRooms(unittest.HomeserverTestCase):
         self.user_id = "@user_id:test"
 
     def test_server_notice_only_sent_once(self):
-        self.store.get_monthly_active_count = Mock(return_value=1000)
+        self.store.get_monthly_active_count = Mock(return_value=make_awaitable(1000))
 
         self.store.user_last_seen_monthly_active = Mock(
-            return_value=defer.succeed(1000)
+            return_value=make_awaitable(1000)
         )
 
         # Call the function multiple times to ensure we only send the notice once
@@ -275,7 +276,7 @@ class TestResourceLimitsServerNoticesWithRealRooms(unittest.HomeserverTestCase):
             self.server_notices_manager.get_or_create_notice_room_for_user(self.user_id)
         )
 
-        token = self.get_success(self.event_source.get_current_token())
+        token = self.event_source.get_current_token()
         events, _ = self.get_success(
             self.store.get_recent_events_for_room(
                 room_id, limit=100, end_token=token.room_key
@@ -304,8 +305,7 @@ class TestResourceLimitsServerNoticesWithRealRooms(unittest.HomeserverTestCase):
         self.register_user("user", "password")
         tok = self.login("user", "password")
 
-        request, channel = self.make_request("GET", "/sync?timeout=0", access_token=tok)
-        self.render(request)
+        channel = self.make_request("GET", "/sync?timeout=0", access_token=tok)
 
         invites = channel.json_body["rooms"]["invite"]
         self.assertEqual(len(invites), 0, invites)
@@ -318,8 +318,7 @@ class TestResourceLimitsServerNoticesWithRealRooms(unittest.HomeserverTestCase):
 
         # Sync again to retrieve the events in the room, so we can check whether this
         # room has a notice in it.
-        request, channel = self.make_request("GET", "/sync?timeout=0", access_token=tok)
-        self.render(request)
+        channel = self.make_request("GET", "/sync?timeout=0", access_token=tok)
 
         # Scan the events in the room to search for a message from the server notices
         # user.
@@ -354,10 +353,7 @@ class TestResourceLimitsServerNoticesWithRealRooms(unittest.HomeserverTestCase):
             tok = self.login(localpart, "password")
 
             # Sync with the user's token to mark the user as active.
-            request, channel = self.make_request(
-                "GET", "/sync?timeout=0", access_token=tok,
-            )
-            self.render(request)
+            channel = self.make_request("GET", "/sync?timeout=0", access_token=tok,)
 
             # Also retrieves the list of invites for this user. We don't care about that
             # one except if we're processing the last user, which should have received an

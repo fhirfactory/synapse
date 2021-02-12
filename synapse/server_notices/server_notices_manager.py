@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+from typing import Optional
 
 from synapse.api.constants import EventTypes, Membership, RoomCreationPreset
+from synapse.events import EventBase
 from synapse.types import UserID, create_requester
 from synapse.util.caches.descriptors import cached
 
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 SERVER_NOTICE_ROOM_TAG = "m.server_notice"
 
 
-class ServerNoticesManager(object):
+class ServerNoticesManager:
     def __init__(self, hs):
         """
 
@@ -33,10 +35,12 @@ class ServerNoticesManager(object):
 
         self._store = hs.get_datastore()
         self._config = hs.config
+        self._account_data_handler = hs.get_account_data_handler()
         self._room_creation_handler = hs.get_room_creation_handler()
         self._room_member_handler = hs.get_room_member_handler()
         self._event_creation_handler = hs.get_event_creation_handler()
         self._is_mine_id = hs.is_mine_id
+        self._server_name = hs.hostname
 
         self._notifier = hs.get_notifier()
         self.server_notices_mxid = self._config.server_notices_mxid
@@ -50,26 +54,29 @@ class ServerNoticesManager(object):
         return self._config.server_notices_mxid is not None
 
     async def send_notice(
-        self, user_id, event_content, type=EventTypes.Message, state_key=None
-    ):
+        self,
+        user_id: str,
+        event_content: dict,
+        type: str = EventTypes.Message,
+        state_key: Optional[bool] = None,
+    ) -> EventBase:
         """Send a notice to the given user
 
         Creates the server notices room, if none exists.
 
         Args:
-            user_id (str): mxid of user to send event to.
-            event_content (dict): content of event to send
-            type(EventTypes): type of event
-            is_state_event(bool): Is the event a state event
-
-        Returns:
-            Deferred[FrozenEvent]
+            user_id: mxid of user to send event to.
+            event_content: content of event to send
+            type: type of event
+            is_state_event: Is the event a state event
         """
         room_id = await self.get_or_create_notice_room_for_user(user_id)
         await self.maybe_invite_user_to_room(user_id, room_id)
 
         system_mxid = self._config.server_notices_mxid
-        requester = create_requester(system_mxid)
+        requester = create_requester(
+            system_mxid, authenticated_entity=self._server_name
+        )
 
         logger.info("Sending server notice to %s", user_id)
 
@@ -89,17 +96,17 @@ class ServerNoticesManager(object):
         return event
 
     @cached()
-    async def get_or_create_notice_room_for_user(self, user_id):
+    async def get_or_create_notice_room_for_user(self, user_id: str) -> str:
         """Get the room for notices for a given user
 
         If we have not yet created a notice room for this user, create it, but don't
         invite the user to it.
 
         Args:
-            user_id (str): complete user id for the user we want a room for
+            user_id: complete user id for the user we want a room for
 
         Returns:
-            str: room id of notice room.
+            room id of notice room.
         """
         if not self.is_enabled():
             raise Exception("Server notices not enabled")
@@ -116,7 +123,7 @@ class ServerNoticesManager(object):
             # manages to invite the system user to a room, that doesn't make it
             # the server notices room.
             user_ids = await self._store.get_users_in_room(room.room_id)
-            if self.server_notices_mxid in user_ids:
+            if len(user_ids) <= 2 and self.server_notices_mxid in user_ids:
                 # we found a room which our user shares with the system notice
                 # user
                 logger.info(
@@ -142,7 +149,9 @@ class ServerNoticesManager(object):
                 "avatar_url": self._config.server_notices_mxid_avatar_url,
             }
 
-        requester = create_requester(self.server_notices_mxid)
+        requester = create_requester(
+            self.server_notices_mxid, authenticated_entity=self._server_name
+        )
         info, _ = await self._room_creation_handler.create_room(
             requester,
             config={
@@ -155,7 +164,7 @@ class ServerNoticesManager(object):
         )
         room_id = info["room_id"]
 
-        max_id = await self._store.add_tag_to_room(
+        max_id = await self._account_data_handler.add_tag_to_room(
             user_id, room_id, SERVER_NOTICE_ROOM_TAG, {}
         )
         self._notifier.on_new_event("account_data_key", max_id, users=[user_id])
@@ -163,7 +172,7 @@ class ServerNoticesManager(object):
         logger.info("Created server notices room %s for %s", room_id, user_id)
         return room_id
 
-    async def maybe_invite_user_to_room(self, user_id: str, room_id: str):
+    async def maybe_invite_user_to_room(self, user_id: str, room_id: str) -> None:
         """Invite the given user to the given server room, unless the user has already
         joined or been invited to it.
 
@@ -171,7 +180,9 @@ class ServerNoticesManager(object):
             user_id: The ID of the user to invite.
             room_id: The ID of the room to invite the user to.
         """
-        requester = create_requester(self.server_notices_mxid)
+        requester = create_requester(
+            self.server_notices_mxid, authenticated_entity=self._server_name
+        )
 
         # Check whether the user has already joined or been invited to this room. If
         # that's the case, there is no need to re-invite them.

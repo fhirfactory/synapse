@@ -16,9 +16,8 @@
 import re
 
 from twisted.internet import task
-from twisted.internet.defer import CancelledError
-from twisted.python import failure
 from twisted.web.client import FileBodyProducer
+from twisted.web.iweb import IRequest
 
 from synapse.api.errors import SynapseError
 
@@ -26,19 +25,8 @@ from synapse.api.errors import SynapseError
 class RequestTimedOutError(SynapseError):
     """Exception representing timeout of an outbound request"""
 
-    def __init__(self):
-        super(RequestTimedOutError, self).__init__(504, "Timed out")
-
-
-def cancelled_to_request_timed_out_error(value, timeout):
-    """Turns CancelledErrors into RequestTimedOutErrors.
-
-    For use with async.add_timeout_to_deferred
-    """
-    if isinstance(value, failure.Failure):
-        value.trap(CancelledError)
-        raise RequestTimedOutError()
-    return value
+    def __init__(self, msg):
+        super().__init__(504, msg)
 
 
 ACCESS_TOKEN_RE = re.compile(r"(\?.*access(_|%5[Ff])token=)[^&]*(.*)$")
@@ -63,3 +51,17 @@ class QuieterFileBodyProducer(FileBodyProducer):
             FileBodyProducer.stopProducing(self)
         except task.TaskStopped:
             pass
+
+
+def get_request_user_agent(request: IRequest, default: str = "") -> str:
+    """Return the last User-Agent header, or the given default.
+    """
+    # There could be raw utf-8 bytes in the User-Agent header.
+
+    # N.B. if you don't do this, the logger explodes cryptically
+    # with maximum recursion trying to log errors about
+    # the charset problem.
+    # c.f. https://github.com/matrix-org/synapse/issues/3471
+
+    h = request.getHeader(b"User-Agent")
+    return h.decode("ascii", "replace") if h else default

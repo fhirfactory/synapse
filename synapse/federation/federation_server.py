@@ -15,13 +15,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from typing import Any, Callable, Dict, List, Match, Optional, Tuple, Union
+import random
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
-import six
-from six import iteritems
-
-from canonicaljson import json
-from prometheus_client import Counter
+from prometheus_client import Counter, Gauge, Histogram
 
 from twisted.internet import defer
 from twisted.internet.abstract import isIPAddress
@@ -42,7 +49,7 @@ from synapse.events import EventBase
 from synapse.federation.federation_base import FederationBase, event_from_pdu_json
 from synapse.federation.persistence import TransactionActions
 from synapse.federation.units import Edu, Transaction
-from synapse.http.endpoint import parse_server_name
+from synapse.http.servlet import assert_params_in_dict
 from synapse.logging.context import (
     make_deferred_yieldable,
     nested_logging_context,
@@ -55,9 +62,13 @@ from synapse.replication.http.federation import (
     ReplicationGetQueryRestServlet,
 )
 from synapse.types import JsonDict, get_domain_from_id
-from synapse.util import glob_to_regex, unwrapFirstError
+from synapse.util import glob_to_regex, json_decoder, unwrapFirstError
 from synapse.util.async_helpers import Linearizer, concurrently_execute
 from synapse.util.caches.response_cache import ResponseCache
+from synapse.util.stringutils import parse_server_name
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 # when processing incoming transactions, we try to handle multiple rooms in
 # parallel, up to this limit.
@@ -73,19 +84,41 @@ received_queries_counter = Counter(
     "synapse_federation_server_received_queries", "", ["type"]
 )
 
+pdu_process_time = Histogram(
+    "synapse_federation_server_pdu_process_time", "Time taken to process an event",
+)
+
+
+last_pdu_age_metric = Gauge(
+    "synapse_federation_last_received_pdu_age",
+    "The age (in seconds) of the last PDU successfully received from the given domain",
+    labelnames=("server_name",),
+)
+
 
 class FederationServer(FederationBase):
     def __init__(self, hs):
-        super(FederationServer, self).__init__(hs)
+        super().__init__(hs)
 
         self.auth = hs.get_auth()
-        self.handler = hs.get_handlers().federation_handler
+        self.handler = hs.get_federation_handler()
         self.state = hs.get_state_handler()
 
         self.device_handler = hs.get_device_handler()
 
+        # Ensure the following handlers are loaded since they register callbacks
+        # with FederationHandlerRegistry.
+        hs.get_directory_handler()
+
+        self._federation_ratelimiter = hs.get_federation_ratelimiter()
+
         self._server_linearizer = Linearizer("fed_server")
         self._transaction_linearizer = Linearizer("fed_txn_handler")
+
+        # We cache results for transaction with the same ID
+        self._transaction_resp_cache = ResponseCache(
+            hs, "fed_txn_handler", timeout_ms=30000
+        )  # type: ResponseCache[Tuple[str, str]]
 
         self.transaction_actions = TransactionActions(self.store)
 
@@ -93,7 +126,16 @@ class FederationServer(FederationBase):
 
         # We cache responses to state queries, as they take a while and often
         # come in waves.
-        self._state_resp_cache = ResponseCache(hs, "state_resp", timeout_ms=30000)
+        self._state_resp_cache = ResponseCache(
+            hs, "state_resp", timeout_ms=30000
+        )  # type: ResponseCache[Tuple[str, str]]
+        self._state_ids_resp_cache = ResponseCache(
+            hs, "state_ids_resp", timeout_ms=30000
+        )  # type: ResponseCache[Tuple[str, str]]
+
+        self._federation_metrics_domains = (
+            hs.get_config().federation.federation_metrics_domains
+        )
 
     async def on_backfill_request(
         self, origin: str, room_id: str, versions: List[str], limit: int
@@ -118,22 +160,44 @@ class FederationServer(FederationBase):
         request_time = self._clock.time_msec()
 
         transaction = Transaction(**transaction_data)
+        transaction_id = transaction.transaction_id  # type: ignore
 
-        if not transaction.transaction_id:  # type: ignore
+        if not transaction_id:
             raise Exception("Transaction missing transaction_id")
 
-        logger.debug("[%s] Got transaction", transaction.transaction_id)  # type: ignore
+        logger.debug("[%s] Got transaction", transaction_id)
 
-        # use a linearizer to ensure that we don't process the same transaction
-        # multiple times in parallel.
-        with (
-            await self._transaction_linearizer.queue(
-                (origin, transaction.transaction_id)  # type: ignore
-            )
-        ):
-            result = await self._handle_incoming_transaction(
-                origin, transaction, request_time
-            )
+        # We wrap in a ResponseCache so that we de-duplicate retried
+        # transactions.
+        return await self._transaction_resp_cache.wrap(
+            (origin, transaction_id),
+            self._on_incoming_transaction_inner,
+            origin,
+            transaction,
+            request_time,
+        )
+
+    async def _on_incoming_transaction_inner(
+        self, origin: str, transaction: Transaction, request_time: int
+    ) -> Tuple[int, Dict[str, Any]]:
+        # Use a linearizer to ensure that transactions from a remote are
+        # processed in order.
+        with await self._transaction_linearizer.queue(origin):
+            # We rate limit here *after* we've queued up the incoming requests,
+            # so that we don't fill up the ratelimiter with blocked requests.
+            #
+            # This is important as the ratelimiter allows N concurrent requests
+            # at a time, and only starts ratelimiting if there are more requests
+            # than that being processed at a time. If we queued up requests in
+            # the linearizer/response cache *after* the ratelimiting then those
+            # queued up requests would count as part of the allowed limit of N
+            # concurrent requests.
+            with self._federation_ratelimiter.ratelimit(origin) as d:
+                await d
+
+                result = await self._handle_incoming_transaction(
+                    origin, transaction, request_time
+                )
 
         return result
 
@@ -217,7 +281,11 @@ class FederationServer(FederationBase):
 
         pdus_by_room = {}  # type: Dict[str, List[EventBase]]
 
+        newest_pdu_ts = 0
+
         for p in transaction.pdus:  # type: ignore
+            # FIXME (richardv): I don't think this works:
+            #  https://github.com/matrix-org/synapse/issues/8429
             if "unsigned" in p:
                 unsigned = p["unsigned"]
                 if "age" in unsigned:
@@ -255,6 +323,9 @@ class FederationServer(FederationBase):
             event = event_from_pdu_json(p, room_version)
             pdus_by_room.setdefault(room_id, []).append(event)
 
+            if event.origin_server_ts > newest_pdu_ts:
+                newest_pdu_ts = event.origin_server_ts
+
         pdu_results = {}
 
         # we can process different rooms in parallel (which is useful if they
@@ -274,25 +345,30 @@ class FederationServer(FederationBase):
 
             for pdu in pdus_by_room[room_id]:
                 event_id = pdu.event_id
-                with nested_logging_context(event_id):
-                    try:
-                        await self._handle_received_pdu(origin, pdu)
-                        pdu_results[event_id] = {}
-                    except FederationError as e:
-                        logger.warning("Error handling PDU %s: %s", event_id, e)
-                        pdu_results[event_id] = {"error": str(e)}
-                    except Exception as e:
-                        f = failure.Failure()
-                        pdu_results[event_id] = {"error": str(e)}
-                        logger.error(
-                            "Failed to handle PDU %s",
-                            event_id,
-                            exc_info=(f.type, f.value, f.getTracebackObject()),
-                        )
+                with pdu_process_time.time():
+                    with nested_logging_context(event_id):
+                        try:
+                            await self._handle_received_pdu(origin, pdu)
+                            pdu_results[event_id] = {}
+                        except FederationError as e:
+                            logger.warning("Error handling PDU %s: %s", event_id, e)
+                            pdu_results[event_id] = {"error": str(e)}
+                        except Exception as e:
+                            f = failure.Failure()
+                            pdu_results[event_id] = {"error": str(e)}
+                            logger.error(
+                                "Failed to handle PDU %s",
+                                event_id,
+                                exc_info=(f.type, f.value, f.getTracebackObject()),
+                            )
 
         await concurrently_execute(
             process_pdus_for_room, pdus_by_room.keys(), TRANSACTION_CONCURRENCY_LIMIT
         )
+
+        if newest_pdu_ts and origin in self._federation_metrics_domains:
+            newest_pdu_age = self._clock.time_msec() - newest_pdu_ts
+            last_pdu_age_metric.labels(server_name=origin).set(newest_pdu_age / 1000)
 
         return pdu_results
 
@@ -317,7 +393,7 @@ class FederationServer(FederationBase):
             TRANSACTION_CONCURRENCY_LIMIT,
         )
 
-    async def on_context_state_request(
+    async def on_room_state_request(
         self, origin: str, room_id: str, event_id: str
     ) -> Tuple[int, Dict[str, Any]]:
         origin_host, _ = parse_server_name(origin)
@@ -360,10 +436,16 @@ class FederationServer(FederationBase):
         if not in_room:
             raise AuthError(403, "Host not in room.")
 
+        resp = await self._state_ids_resp_cache.wrap(
+            (room_id, event_id), self._on_state_ids_request_compute, room_id, event_id,
+        )
+
+        return 200, resp
+
+    async def _on_state_ids_request_compute(self, room_id, event_id):
         state_ids = await self.handler.get_state_ids_for_pdu(room_id, event_id)
         auth_chain_ids = await self.store.get_auth_chain_ids(state_ids)
-
-        return 200, {"pdu_ids": state_ids, "auth_chain_ids": auth_chain_ids}
+        return {"pdu_ids": state_ids, "auth_chain_ids": auth_chain_ids}
 
     async def _on_context_state_request_compute(
         self, room_id: str, event_id: str
@@ -434,11 +516,12 @@ class FederationServer(FederationBase):
         return {"event": ret_pdu.get_pdu_json(time_now)}
 
     async def on_send_join_request(
-        self, origin: str, content: JsonDict, room_id: str
+        self, origin: str, content: JsonDict
     ) -> Dict[str, Any]:
         logger.debug("on_send_join_request: content: %s", content)
 
-        room_version = await self.store.get_room_version(room_id)
+        assert_params_in_dict(content, ["room_id"])
+        room_version = await self.store.get_room_version(content["room_id"])
         pdu = event_from_pdu_json(content, room_version)
 
         origin_host, _ = parse_server_name(origin)
@@ -467,12 +550,11 @@ class FederationServer(FederationBase):
         time_now = self._clock.time_msec()
         return {"event": pdu.get_pdu_json(time_now), "room_version": room_version}
 
-    async def on_send_leave_request(
-        self, origin: str, content: JsonDict, room_id: str
-    ) -> dict:
+    async def on_send_leave_request(self, origin: str, content: JsonDict) -> dict:
         logger.debug("on_send_leave_request: content: %s", content)
 
-        room_version = await self.store.get_room_version(room_id)
+        assert_params_in_dict(content, ["room_id"])
+        room_version = await self.store.get_room_version(content["room_id"])
         pdu = event_from_pdu_json(content, room_version)
 
         origin_host, _ = parse_server_name(origin)
@@ -524,9 +606,9 @@ class FederationServer(FederationBase):
         json_result = {}  # type: Dict[str, Dict[str, dict]]
         for user_id, device_keys in results.items():
             for device_id, keys in device_keys.items():
-                for key_id, json_bytes in keys.items():
+                for key_id, json_str in keys.items():
                     json_result.setdefault(user_id, {})[device_id] = {
-                        key_id: json.loads(json_bytes)
+                        key_id: json_decoder.decode(json_str)
                     }
 
         logger.info(
@@ -534,9 +616,9 @@ class FederationServer(FederationBase):
             ",".join(
                 (
                     "%s for %s:%s" % (key_id, user_id, device_id)
-                    for user_id, user_keys in iteritems(json_result)
-                    for device_id, device_keys in iteritems(user_keys)
-                    for key_id, _ in iteritems(device_keys)
+                    for user_id, user_keys in json_result.items()
+                    for device_id, device_keys in user_keys.items()
+                    for key_id, _ in device_keys.items()
                 )
             ),
         )
@@ -668,12 +750,8 @@ class FederationServer(FederationBase):
         )
         return ret
 
-    async def on_exchange_third_party_invite_request(
-        self, room_id: str, event_dict: Dict
-    ):
-        ret = await self.handler.on_exchange_third_party_invite_request(
-            room_id, event_dict
-        )
+    async def on_exchange_third_party_invite_request(self, event_dict: Dict):
+        ret = await self.handler.on_exchange_third_party_invite_request(event_dict)
         return ret
 
     async def check_server_matches_acl(self, server_name: str, room_id: str):
@@ -715,7 +793,7 @@ def server_matches_acl_event(server_name: str, acl_event: EventBase) -> bool:
     # server name is a literal IP
     allow_ip_literals = acl_event.content.get("allow_ip_literals", True)
     if not isinstance(allow_ip_literals, bool):
-        logger.warning("Ignorning non-bool allow_ip_literals flag")
+        logger.warning("Ignoring non-bool allow_ip_literals flag")
         allow_ip_literals = True
     if not allow_ip_literals:
         # check for ipv6 literals. These start with '['.
@@ -729,7 +807,7 @@ def server_matches_acl_event(server_name: str, acl_event: EventBase) -> bool:
     # next,  check the deny list
     deny = acl_event.content.get("deny", [])
     if not isinstance(deny, (list, tuple)):
-        logger.warning("Ignorning non-list deny ACL %s", deny)
+        logger.warning("Ignoring non-list deny ACL %s", deny)
         deny = []
     for e in deny:
         if _acl_entry_matches(server_name, e):
@@ -739,7 +817,7 @@ def server_matches_acl_event(server_name: str, acl_event: EventBase) -> bool:
     # then the allow list.
     allow = acl_event.content.get("allow", [])
     if not isinstance(allow, (list, tuple)):
-        logger.warning("Ignorning non-list allow ACL %s", allow)
+        logger.warning("Ignoring non-list allow ACL %s", allow)
         allow = []
     for e in allow:
         if _acl_entry_matches(server_name, e):
@@ -751,26 +829,46 @@ def server_matches_acl_event(server_name: str, acl_event: EventBase) -> bool:
     return False
 
 
-def _acl_entry_matches(server_name: str, acl_entry: str) -> Match:
-    if not isinstance(acl_entry, six.string_types):
+def _acl_entry_matches(server_name: str, acl_entry: Any) -> bool:
+    if not isinstance(acl_entry, str):
         logger.warning(
             "Ignoring non-str ACL entry '%s' (is %s)", acl_entry, type(acl_entry)
         )
         return False
     regex = glob_to_regex(acl_entry)
-    return regex.match(server_name)
+    return bool(regex.match(server_name))
 
 
-class FederationHandlerRegistry(object):
+class FederationHandlerRegistry:
     """Allows classes to register themselves as handlers for a given EDU or
     query type for incoming federation traffic.
     """
 
-    def __init__(self):
-        self.edu_handlers = {}
-        self.query_handlers = {}
+    def __init__(self, hs: "HomeServer"):
+        self.config = hs.config
+        self.clock = hs.get_clock()
+        self._instance_name = hs.get_instance_name()
 
-    def register_edu_handler(self, edu_type: str, handler: Callable[[str, dict], None]):
+        # These are safe to load in monolith mode, but will explode if we try
+        # and use them. However we have guards before we use them to ensure that
+        # we don't route to ourselves, and in monolith mode that will always be
+        # the case.
+        self._get_query_client = ReplicationGetQueryRestServlet.make_client(hs)
+        self._send_edu = ReplicationFederationSendEduRestServlet.make_client(hs)
+
+        self.edu_handlers = (
+            {}
+        )  # type: Dict[str, Callable[[str, dict], Awaitable[None]]]
+        self.query_handlers = {}  # type: Dict[str, Callable[[dict], Awaitable[None]]]
+
+        # Map from type to instance names that we should route EDU handling to.
+        # We randomly choose one instance from the list to route to for each new
+        # EDU received.
+        self._edu_type_to_instance = {}  # type: Dict[str, List[str]]
+
+    def register_edu_handler(
+        self, edu_type: str, handler: Callable[[str, JsonDict], Awaitable[None]]
+    ):
         """Sets the handler callable that will be used to handle an incoming
         federation EDU of the given type.
 
@@ -807,66 +905,64 @@ class FederationHandlerRegistry(object):
 
         self.query_handlers[query_type] = handler
 
+    def register_instance_for_edu(self, edu_type: str, instance_name: str):
+        """Register that the EDU handler is on a different instance than master.
+        """
+        self._edu_type_to_instance[edu_type] = [instance_name]
+
+    def register_instances_for_edu(self, edu_type: str, instance_names: List[str]):
+        """Register that the EDU handler is on multiple instances.
+        """
+        self._edu_type_to_instance[edu_type] = instance_names
+
     async def on_edu(self, edu_type: str, origin: str, content: dict):
-        handler = self.edu_handlers.get(edu_type)
-        if not handler:
-            logger.warning("No handler registered for EDU type %s", edu_type)
+        if not self.config.use_presence and edu_type == "m.presence":
             return
 
-        with start_active_span_from_edu(content, "handle_edu"):
+        # Check if we have a handler on this instance
+        handler = self.edu_handlers.get(edu_type)
+        if handler:
+            with start_active_span_from_edu(content, "handle_edu"):
+                try:
+                    await handler(origin, content)
+                except SynapseError as e:
+                    logger.info("Failed to handle edu %r: %r", edu_type, e)
+                except Exception:
+                    logger.exception("Failed to handle edu %r", edu_type)
+            return
+
+        # Check if we can route it somewhere else that isn't us
+        instances = self._edu_type_to_instance.get(edu_type, ["master"])
+        if self._instance_name not in instances:
+            # Pick an instance randomly so that we don't overload one.
+            route_to = random.choice(instances)
+
             try:
-                await handler(origin, content)
+                await self._send_edu(
+                    instance_name=route_to,
+                    edu_type=edu_type,
+                    origin=origin,
+                    content=content,
+                )
             except SynapseError as e:
                 logger.info("Failed to handle edu %r: %r", edu_type, e)
             except Exception:
                 logger.exception("Failed to handle edu %r", edu_type)
-
-    def on_query(self, query_type: str, args: dict) -> defer.Deferred:
-        handler = self.query_handlers.get(query_type)
-        if not handler:
-            logger.warning("No handler registered for query type %s", query_type)
-            raise NotFoundError("No handler for Query type '%s'" % (query_type,))
-
-        return handler(args)
-
-
-class ReplicationFederationHandlerRegistry(FederationHandlerRegistry):
-    """A FederationHandlerRegistry for worker processes.
-
-    When receiving EDU or queries it will check if an appropriate handler has
-    been registered on the worker, if there isn't one then it calls off to the
-    master process.
-    """
-
-    def __init__(self, hs):
-        self.config = hs.config
-        self.http_client = hs.get_simple_http_client()
-        self.clock = hs.get_clock()
-
-        self._get_query_client = ReplicationGetQueryRestServlet.make_client(hs)
-        self._send_edu = ReplicationFederationSendEduRestServlet.make_client(hs)
-
-        super(ReplicationFederationHandlerRegistry, self).__init__()
-
-    async def on_edu(self, edu_type: str, origin: str, content: dict):
-        """Overrides FederationHandlerRegistry
-        """
-        if not self.config.use_presence and edu_type == "m.presence":
             return
 
-        handler = self.edu_handlers.get(edu_type)
-        if handler:
-            return await super(ReplicationFederationHandlerRegistry, self).on_edu(
-                edu_type, origin, content
-            )
-
-        return await self._send_edu(edu_type=edu_type, origin=origin, content=content)
+        # Oh well, let's just log and move on.
+        logger.warning("No handler registered for EDU type %s", edu_type)
 
     async def on_query(self, query_type: str, args: dict):
-        """Overrides FederationHandlerRegistry
-        """
         handler = self.query_handlers.get(query_type)
         if handler:
             return await handler(args)
 
-        return await self._get_query_client(query_type=query_type, args=args)
+        # Check if we can route it somewhere else that isn't us
+        if self._instance_name == "master":
+            return await self._get_query_client(query_type=query_type, args=args)
+
+        # Uh oh, no handler! Let's raise an exception so the request returns an
+        # error.
+        logger.warning("No handler registered for query type %s", query_type)
+        raise NotFoundError("No handler for Query type '%s'" % (query_type,))

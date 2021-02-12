@@ -15,10 +15,8 @@
 import hashlib
 import hmac
 import logging
-import re
-
-from six import text_type
-from six.moves import http_client
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Tuple
 
 from synapse.api.constants import UserTypes
 from synapse.api.errors import Codes, NotFoundError, SynapseError
@@ -30,24 +28,29 @@ from synapse.http.servlet import (
     parse_json_object_from_request,
     parse_string,
 )
+from synapse.http.site import SynapseRequest
 from synapse.rest.admin._base import (
+    admin_patterns,
     assert_requester_is_admin,
     assert_user_is_admin,
-    historical_admin_path_patterns,
 )
-from synapse.types import UserID
+from synapse.rest.client.v2_alpha._base import client_patterns
+from synapse.types import JsonDict, UserID
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
 
 class UsersRestServlet(RestServlet):
-    PATTERNS = historical_admin_path_patterns("/users/(?P<user_id>[^/]*)$")
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]*)$")
 
     def __init__(self, hs):
         self.hs = hs
         self.store = hs.get_datastore()
         self.auth = hs.get_auth()
-        self.admin_handler = hs.get_handlers().admin_handler
+        self.admin_handler = hs.get_admin_handler()
 
     async def on_GET(self, request, user_id):
         target_user = UserID.from_string(user_id)
@@ -62,7 +65,7 @@ class UsersRestServlet(RestServlet):
 
 
 class UsersRestServletV2(RestServlet):
-    PATTERNS = (re.compile("^/_synapse/admin/v2/users$"),)
+    PATTERNS = admin_patterns("/users$", "v2")
 
     """Get request to list all local users.
     This needs user to have administrator access in Synapse.
@@ -75,6 +78,7 @@ class UsersRestServletV2(RestServlet):
     The parameters `from` and `limit` are required only for pagination.
     By default, a `limit` of 100 is used.
     The parameter `user_id` can be used to filter by user id.
+    The parameter `name` can be used to filter by user id or display name.
     The parameter `guests` can be used to exclude guest users.
     The parameter `deactivated` can be used to include deactivated users.
     """
@@ -83,7 +87,7 @@ class UsersRestServletV2(RestServlet):
         self.hs = hs
         self.store = hs.get_datastore()
         self.auth = hs.get_auth()
-        self.admin_handler = hs.get_handlers().admin_handler
+        self.admin_handler = hs.get_admin_handler()
 
     async def on_GET(self, request):
         await assert_requester_is_admin(self.auth, request)
@@ -91,11 +95,12 @@ class UsersRestServletV2(RestServlet):
         start = parse_integer(request, "from", default=0)
         limit = parse_integer(request, "limit", default=100)
         user_id = parse_string(request, "user_id", default=None)
+        name = parse_string(request, "name", default=None)
         guests = parse_boolean(request, "guests", default=True)
         deactivated = parse_boolean(request, "deactivated", default=False)
 
         users, total = await self.store.get_users_paginate(
-            start, limit, user_id, guests, deactivated
+            start, limit, user_id, name, guests, deactivated
         )
         ret = {"users": users, "total": total}
         if len(users) >= limit:
@@ -105,7 +110,7 @@ class UsersRestServletV2(RestServlet):
 
 
 class UserRestServletV2(RestServlet):
-    PATTERNS = (re.compile("^/_synapse/admin/v2/users/(?P<user_id>[^/]+)$"),)
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]+)$", "v2")
 
     """Get request to list user details.
     This needs user to have administrator access in Synapse.
@@ -135,13 +140,14 @@ class UserRestServletV2(RestServlet):
     def __init__(self, hs):
         self.hs = hs
         self.auth = hs.get_auth()
-        self.admin_handler = hs.get_handlers().admin_handler
+        self.admin_handler = hs.get_admin_handler()
         self.store = hs.get_datastore()
         self.auth_handler = hs.get_auth_handler()
         self.profile_handler = hs.get_profile_handler()
         self.set_password_handler = hs.get_set_password_handler()
         self.deactivate_account_handler = hs.get_deactivate_account_handler()
         self.registration_handler = hs.get_registration_handler()
+        self.pusher_pool = hs.get_pusherpool()
 
     async def on_GET(self, request, user_id):
         await assert_requester_is_admin(self.auth, request)
@@ -214,10 +220,7 @@ class UserRestServletV2(RestServlet):
                     await self.store.set_server_admin(target_user, set_admin_to)
 
             if "password" in body:
-                if (
-                    not isinstance(body["password"], text_type)
-                    or len(body["password"]) > 512
-                ):
+                if not isinstance(body["password"], str) or len(body["password"]) > 512:
                     raise SynapseError(400, "Invalid password")
                 else:
                     new_password = body["password"]
@@ -241,7 +244,16 @@ class UserRestServletV2(RestServlet):
 
                 if deactivate and not user["deactivated"]:
                     await self.deactivate_account_handler.deactivate_account(
-                        target_user.to_string(), False
+                        target_user.to_string(), False, requester, by_admin=True
+                    )
+                elif not deactivate and user["deactivated"]:
+                    if "password" not in body:
+                        raise SynapseError(
+                            400, "Must provide a password to re-activate an account."
+                        )
+
+                    await self.deactivate_account_handler.activate_account(
+                        target_user.to_string()
                     )
 
             user = await self.admin_handler.get_user(target_user)
@@ -251,14 +263,13 @@ class UserRestServletV2(RestServlet):
             password = body.get("password")
             password_hash = None
             if password is not None:
-                if not isinstance(password, text_type) or len(password) > 512:
+                if not isinstance(password, str) or len(password) > 512:
                     raise SynapseError(400, "Invalid password")
                 password_hash = await self.auth_handler.hash(password)
 
             admin = body.get("admin", None)
             user_type = body.get("user_type", None)
             displayname = body.get("displayname", None)
-            threepids = body.get("threepids", None)
 
             if user_type is not None and user_type not in UserTypes.ALL_USER_TYPES:
                 raise SynapseError(400, "Invalid user type")
@@ -269,6 +280,7 @@ class UserRestServletV2(RestServlet):
                 admin=bool(admin),
                 default_display_name=displayname,
                 user_type=user_type,
+                by_admin=True,
             )
 
             if "threepids" in body:
@@ -281,10 +293,25 @@ class UserRestServletV2(RestServlet):
                     await self.auth_handler.add_threepid(
                         user_id, threepid["medium"], threepid["address"], current_time
                     )
+                    if (
+                        self.hs.config.email_enable_notifs
+                        and self.hs.config.email_notif_for_new_users
+                    ):
+                        await self.pusher_pool.add_pusher(
+                            user_id=user_id,
+                            access_token=None,
+                            kind="email",
+                            app_id="m.email",
+                            app_display_name="Email Notifications",
+                            device_display_name=threepid["address"],
+                            pushkey=threepid["address"],
+                            lang=None,  # We don't know a user's language here
+                            data={},
+                        )
 
-            if "avatar_url" in body and type(body["avatar_url"]) == str:
+            if "avatar_url" in body and isinstance(body["avatar_url"], str):
                 await self.profile_handler.set_avatar_url(
-                    user_id, requester, body["avatar_url"], True
+                    target_user, requester, body["avatar_url"], True
                 )
 
             ret = await self.admin_handler.get_user(target_user)
@@ -300,7 +327,7 @@ class UserRegisterServlet(RestServlet):
              nonce to the time it was generated, in int seconds.
     """
 
-    PATTERNS = historical_admin_path_patterns("/register")
+    PATTERNS = admin_patterns("/register")
     NONCE_TIMEOUT = 60
 
     def __init__(self, hs):
@@ -353,10 +380,7 @@ class UserRegisterServlet(RestServlet):
                 400, "username must be specified", errcode=Codes.BAD_JSON
             )
         else:
-            if (
-                not isinstance(body["username"], text_type)
-                or len(body["username"]) > 512
-            ):
+            if not isinstance(body["username"], str) or len(body["username"]) > 512:
                 raise SynapseError(400, "Invalid username")
 
             username = body["username"].encode("utf-8")
@@ -369,7 +393,7 @@ class UserRegisterServlet(RestServlet):
             )
         else:
             password = body["password"]
-            if not isinstance(password, text_type) or len(password) > 512:
+            if not isinstance(password, str) or len(password) > 512:
                 raise SynapseError(400, "Invalid password")
 
             password_bytes = password.encode("utf-8")
@@ -380,9 +404,13 @@ class UserRegisterServlet(RestServlet):
 
         admin = body.get("admin", None)
         user_type = body.get("user_type", None)
+        displayname = body.get("displayname", None)
 
         if user_type is not None and user_type not in UserTypes.ALL_USER_TYPES:
             raise SynapseError(400, "Invalid user type")
+
+        if "mac" not in body:
+            raise SynapseError(400, "mac must be specified", errcode=Codes.BAD_JSON)
 
         got_mac = body["mac"]
 
@@ -416,6 +444,8 @@ class UserRegisterServlet(RestServlet):
             password_hash=password_hash,
             admin=bool(admin),
             user_type=user_type,
+            default_display_name=displayname,
+            by_admin=True,
         )
 
         result = await register._create_registration_details(user_id, body)
@@ -423,12 +453,19 @@ class UserRegisterServlet(RestServlet):
 
 
 class WhoisRestServlet(RestServlet):
-    PATTERNS = historical_admin_path_patterns("/whois/(?P<user_id>[^/]*)")
+    path_regex = "/whois/(?P<user_id>[^/]*)$"
+    PATTERNS = (
+        admin_patterns(path_regex)
+        +
+        # URL for spec reason
+        # https://matrix.org/docs/spec/client_server/r0.6.1#get-matrix-client-r0-admin-whois-userid
+        client_patterns("/admin" + path_regex, v1=True)
+    )
 
     def __init__(self, hs):
         self.hs = hs
         self.auth = hs.get_auth()
-        self.handlers = hs.get_handlers()
+        self.admin_handler = hs.get_admin_handler()
 
     async def on_GET(self, request, user_id):
         target_user = UserID.from_string(user_id)
@@ -441,33 +478,41 @@ class WhoisRestServlet(RestServlet):
         if not self.hs.is_mine(target_user):
             raise SynapseError(400, "Can only whois a local user")
 
-        ret = await self.handlers.admin_handler.get_whois(target_user)
+        ret = await self.admin_handler.get_whois(target_user)
 
         return 200, ret
 
 
 class DeactivateAccountRestServlet(RestServlet):
-    PATTERNS = historical_admin_path_patterns("/deactivate/(?P<target_user_id>[^/]*)")
+    PATTERNS = admin_patterns("/deactivate/(?P<target_user_id>[^/]*)")
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         self._deactivate_account_handler = hs.get_deactivate_account_handler()
         self.auth = hs.get_auth()
+        self.is_mine = hs.is_mine
+        self.store = hs.get_datastore()
 
-    async def on_POST(self, request, target_user_id):
-        await assert_requester_is_admin(self.auth, request)
+    async def on_POST(self, request: str, target_user_id: str) -> Tuple[int, JsonDict]:
+        requester = await self.auth.get_user_by_req(request)
+        await assert_user_is_admin(self.auth, requester.user)
+
+        if not self.is_mine(UserID.from_string(target_user_id)):
+            raise SynapseError(400, "Can only deactivate local users")
+
+        if not await self.store.get_user_by_id(target_user_id):
+            raise NotFoundError("User not found")
+
         body = parse_json_object_from_request(request, allow_empty_body=True)
         erase = body.get("erase", False)
         if not isinstance(erase, bool):
             raise SynapseError(
-                http_client.BAD_REQUEST,
+                HTTPStatus.BAD_REQUEST,
                 "Param 'erase' must be a boolean, if given",
                 Codes.BAD_JSON,
             )
 
-        UserID.from_string(target_user_id)
-
         result = await self._deactivate_account_handler.deactivate_account(
-            target_user_id, erase
+            target_user_id, erase, requester, by_admin=True
         )
         if result:
             id_server_unbind_result = "success"
@@ -478,7 +523,7 @@ class DeactivateAccountRestServlet(RestServlet):
 
 
 class AccountValidityRenewServlet(RestServlet):
-    PATTERNS = historical_admin_path_patterns("/account_validity/validity$")
+    PATTERNS = admin_patterns("/account_validity/validity$")
 
     def __init__(self, hs):
         """
@@ -521,9 +566,7 @@ class ResetPasswordRestServlet(RestServlet):
             200 OK with empty object if success otherwise an error.
         """
 
-    PATTERNS = historical_admin_path_patterns(
-        "/reset_password/(?P<target_user_id>[^/]*)"
-    )
+    PATTERNS = admin_patterns("/reset_password/(?P<target_user_id>[^/]*)")
 
     def __init__(self, hs):
         self.store = hs.get_datastore()
@@ -565,13 +608,12 @@ class SearchUsersRestServlet(RestServlet):
             200 OK with json object {list[dict[str, Any]], count} or empty object.
     """
 
-    PATTERNS = historical_admin_path_patterns("/search_users/(?P<target_user_id>[^/]*)")
+    PATTERNS = admin_patterns("/search_users/(?P<target_user_id>[^/]*)")
 
     def __init__(self, hs):
         self.hs = hs
         self.store = hs.get_datastore()
         self.auth = hs.get_auth()
-        self.handlers = hs.get_handlers()
 
     async def on_GET(self, request, target_user_id):
         """Get request to search user table for specific users according to
@@ -592,7 +634,7 @@ class SearchUsersRestServlet(RestServlet):
         term = parse_string(request, "term", required=True)
         logger.info("term: %s ", term)
 
-        ret = await self.handlers.store.search_users(term)
+        ret = await self.store.search_users(term)
         return 200, ret
 
 
@@ -622,7 +664,7 @@ class UserAdminServlet(RestServlet):
                 {}
     """
 
-    PATTERNS = (re.compile("^/_synapse/admin/v1/users/(?P<user_id>[^/]*)/admin$"),)
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]*)/admin$")
 
     def __init__(self, hs):
         self.hs = hs
@@ -663,3 +705,173 @@ class UserAdminServlet(RestServlet):
         await self.store.set_server_admin(target_user, set_admin_to)
 
         return 200, {}
+
+
+class UserMembershipRestServlet(RestServlet):
+    """
+    Get room list of an user.
+    """
+
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]+)/joined_rooms$")
+
+    def __init__(self, hs):
+        self.is_mine = hs.is_mine
+        self.auth = hs.get_auth()
+        self.store = hs.get_datastore()
+
+    async def on_GET(self, request, user_id):
+        await assert_requester_is_admin(self.auth, request)
+
+        room_ids = await self.store.get_rooms_for_user(user_id)
+        ret = {"joined_rooms": list(room_ids), "total": len(room_ids)}
+        return 200, ret
+
+
+class PushersRestServlet(RestServlet):
+    """
+    Gets information about all pushers for a specific `user_id`.
+
+    Example:
+        http://localhost:8008/_synapse/admin/v1/users/
+        @user:server/pushers
+
+    Returns:
+        pushers: Dictionary containing pushers information.
+        total: Number of pushers in dictonary `pushers`.
+    """
+
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]*)/pushers$")
+
+    def __init__(self, hs):
+        self.is_mine = hs.is_mine
+        self.store = hs.get_datastore()
+        self.auth = hs.get_auth()
+
+    async def on_GET(
+        self, request: SynapseRequest, user_id: str
+    ) -> Tuple[int, JsonDict]:
+        await assert_requester_is_admin(self.auth, request)
+
+        if not self.is_mine(UserID.from_string(user_id)):
+            raise SynapseError(400, "Can only lookup local users")
+
+        if not await self.store.get_user_by_id(user_id):
+            raise NotFoundError("User not found")
+
+        pushers = await self.store.get_pushers_by_user_id(user_id)
+
+        filtered_pushers = [p.as_dict() for p in pushers]
+
+        return 200, {"pushers": filtered_pushers, "total": len(filtered_pushers)}
+
+
+class UserMediaRestServlet(RestServlet):
+    """
+    Gets information about all uploaded local media for a specific `user_id`.
+
+    Example:
+        http://localhost:8008/_synapse/admin/v1/users/
+        @user:server/media
+
+    Args:
+        The parameters `from` and `limit` are required for pagination.
+        By default, a `limit` of 100 is used.
+    Returns:
+        A list of media and an integer representing the total number of
+        media that exist given for this user
+    """
+
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]+)/media$")
+
+    def __init__(self, hs):
+        self.is_mine = hs.is_mine
+        self.auth = hs.get_auth()
+        self.store = hs.get_datastore()
+
+    async def on_GET(
+        self, request: SynapseRequest, user_id: str
+    ) -> Tuple[int, JsonDict]:
+        await assert_requester_is_admin(self.auth, request)
+
+        if not self.is_mine(UserID.from_string(user_id)):
+            raise SynapseError(400, "Can only lookup local users")
+
+        user = await self.store.get_user_by_id(user_id)
+        if user is None:
+            raise NotFoundError("Unknown user")
+
+        start = parse_integer(request, "from", default=0)
+        limit = parse_integer(request, "limit", default=100)
+
+        if start < 0:
+            raise SynapseError(
+                400,
+                "Query parameter from must be a string representing a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+
+        if limit < 0:
+            raise SynapseError(
+                400,
+                "Query parameter limit must be a string representing a positive integer.",
+                errcode=Codes.INVALID_PARAM,
+            )
+
+        media, total = await self.store.get_local_media_by_user_paginate(
+            start, limit, user_id
+        )
+
+        ret = {"media": media, "total": total}
+        if (start + limit) < total:
+            ret["next_token"] = start + len(media)
+
+        return 200, ret
+
+
+class UserTokenRestServlet(RestServlet):
+    """An admin API for logging in as a user.
+
+    Example:
+
+        POST /_synapse/admin/v1/users/@test:example.com/login
+        {}
+
+        200 OK
+        {
+            "access_token": "<some_token>"
+        }
+    """
+
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]*)/login$")
+
+    def __init__(self, hs: "HomeServer"):
+        self.hs = hs
+        self.store = hs.get_datastore()
+        self.auth = hs.get_auth()
+        self.auth_handler = hs.get_auth_handler()
+
+    async def on_POST(self, request, user_id):
+        requester = await self.auth.get_user_by_req(request)
+        await assert_user_is_admin(self.auth, requester.user)
+        auth_user = requester.user
+
+        if not self.hs.is_mine_id(user_id):
+            raise SynapseError(400, "Only local users can be logged in as")
+
+        body = parse_json_object_from_request(request, allow_empty_body=True)
+
+        valid_until_ms = body.get("valid_until_ms")
+        if valid_until_ms and not isinstance(valid_until_ms, int):
+            raise SynapseError(400, "'valid_until_ms' parameter must be an int")
+
+        if auth_user.to_string() == user_id:
+            raise SynapseError(400, "Cannot use admin API to login as self")
+
+        token = await self.auth_handler.get_access_token_for_user_id(
+            user_id=auth_user.to_string(),
+            device_id=None,
+            valid_until_ms=valid_until_ms,
+            puppets_user_id=user_id,
+        )
+
+        return 200, {"access_token": token}

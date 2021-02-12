@@ -13,17 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 
 from twisted.web.resource import Resource
 
 from synapse.http.server import set_cors_headers
+from synapse.util import json_encoder
 
 logger = logging.getLogger(__name__)
 
 
-class WellKnownBuilder(object):
+class WellKnownBuilder:
     """Utility to construct the well-known response
 
     Args:
@@ -34,10 +34,6 @@ class WellKnownBuilder(object):
         self._config = hs.config
 
     def get_well_known(self):
-        # if we don't have a public_baseurl, we can't help much here.
-        if self._config.public_baseurl is None:
-            return None
-
         result = {"m.homeserver": {"base_url": self._config.public_baseurl}}
 
         if self._config.default_identity_server:
@@ -67,4 +63,4 @@ class WellKnownResource(Resource):
 
         logger.debug("returning: %s", r)
         request.setHeader(b"Content-Type", b"application/json")
-        return json.dumps(r).encode("utf-8")
+        return json_encoder.encode(r).encode("utf-8")

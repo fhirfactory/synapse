@@ -5,6 +5,16 @@ Before upgrading check if any special steps are required to upgrade from the
 version you currently have installed to the current version of Synapse. The extra
 instructions that may be required are listed later in this document.
 
+* Check that your versions of Python and PostgreSQL are still supported.
+
+  Synapse follows upstream lifecycles for `Python`_ and `PostgreSQL`_, and
+  removes support for versions which are no longer maintained.
+
+  The website https://endoflife.date also offers convenient summaries.
+
+  .. _Python: https://devguide.python.org/devcycle/#end-of-life-branches
+  .. _PostgreSQL: https://www.postgresql.org/support/versioning/
+
 * If Synapse was installed using `prebuilt packages
   <INSTALL.md#prebuilt-packages>`_, you will need to follow the normal process
   for upgrading those packages.
@@ -74,6 +84,245 @@ for example:
      # replace `1.3.0` and `stretch` accordingly:
      wget https://packages.matrix.org/debian/pool/main/m/matrix-synapse-py3/matrix-synapse-py3_1.3.0+stretch1_amd64.deb
      dpkg -i matrix-synapse-py3_1.3.0+stretch1_amd64.deb
+
+Upgrading to v1.26.0
+====================
+
+Rolling back to v1.25.0 after a failed upgrade
+----------------------------------------------
+
+v1.26.0 includes a lot of large changes. If something problematic occurs, you
+may want to roll-back to a previous version of Synapse. Because v1.26.0 also
+includes a new database schema version, reverting that version is also required
+alongside the generic rollback instructions mentioned above. In short, to roll
+back to v1.25.0 you need to:
+
+1. Stop the server
+2. Decrease the schema version in the database:
+
+   .. code:: sql
+
+      UPDATE schema_version SET version = 58;
+
+3. Delete the ignored users & chain cover data:
+
+   .. code:: sql
+
+      DROP TABLE IF EXISTS ignored_users;
+      UPDATE rooms SET has_auth_chain_index = false;
+
+   For PostgreSQL run:
+
+   .. code:: sql
+
+      TRUNCATE event_auth_chain_links;
+      TRUNCATE event_auth_chains;
+
+   For SQLite run:
+
+   .. code:: sql
+
+      DELETE FROM event_auth_chain_links;
+      DELETE FROM event_auth_chains;
+
+4. Mark the deltas as not run (so they will re-run on upgrade).
+
+   .. code:: sql
+
+      DELETE FROM applied_schema_deltas WHERE version = 59 AND file = "59/01ignored_user.py";
+      DELETE FROM applied_schema_deltas WHERE version = 59 AND file = "59/06chain_cover_index.sql";
+
+5. Downgrade Synapse by following the instructions for your installation method
+   in the "Rolling back to older versions" section above.
+
+Upgrading to v1.25.0
+====================
+
+Last release supporting Python 3.5
+----------------------------------
+
+This is the last release of Synapse which guarantees support with Python 3.5,
+which passed its upstream End of Life date several months ago.
+
+We will attempt to maintain support through March 2021, but without guarantees.
+
+In the future, Synapse will follow upstream schedules for ending support of
+older versions of Python and PostgreSQL. Please upgrade to at least Python 3.6
+and PostgreSQL 9.6 as soon as possible.
+
+Blacklisting IP ranges
+----------------------
+
+Synapse v1.25.0 includes new settings, ``ip_range_blacklist`` and
+``ip_range_whitelist``, for controlling outgoing requests from Synapse for federation,
+identity servers, push, and for checking key validity for third-party invite events.
+The previous setting, ``federation_ip_range_blacklist``, is deprecated. The new
+``ip_range_blacklist`` defaults to private IP ranges if it is not defined.
+
+If you have never customised ``federation_ip_range_blacklist`` it is recommended
+that you remove that setting.
+
+If you have customised ``federation_ip_range_blacklist`` you should update the
+setting name to ``ip_range_blacklist``.
+
+If you have a custom push server that is reached via private IP space you may
+need to customise ``ip_range_blacklist`` or ``ip_range_whitelist``.
+
+Upgrading to v1.24.0
+====================
+
+Custom OpenID Connect mapping provider breaking change
+------------------------------------------------------
+
+This release allows the OpenID Connect mapping provider to perform normalisation
+of the localpart of the Matrix ID. This allows for the mapping provider to
+specify different algorithms, instead of the [default way](https://matrix.org/docs/spec/appendices#mapping-from-other-character-sets).
+
+If your Synapse configuration uses a custom mapping provider
+(`oidc_config.user_mapping_provider.module` is specified and not equal to
+`synapse.handlers.oidc_handler.JinjaOidcMappingProvider`) then you *must* ensure
+that `map_user_attributes` of the mapping provider performs some normalisation
+of the `localpart` returned. To match previous behaviour you can use the
+`map_username_to_mxid_localpart` function provided by Synapse. An example is
+shown below:
+
+.. code-block:: python
+
+  from synapse.types import map_username_to_mxid_localpart
+
+  class MyMappingProvider:
+      def map_user_attributes(self, userinfo, token):
+          # ... your custom logic ...
+          sso_user_id = ...
+          localpart = map_username_to_mxid_localpart(sso_user_id)
+
+          return {"localpart": localpart}
+
+Removal historical Synapse Admin API 
+------------------------------------
+
+Historically, the Synapse Admin API has been accessible under:
+
+* ``/_matrix/client/api/v1/admin``
+* ``/_matrix/client/unstable/admin``
+* ``/_matrix/client/r0/admin``
+* ``/_synapse/admin/v1``
+
+The endpoints with ``/_matrix/client/*`` prefixes have been removed as of v1.24.0.
+The Admin API is now only accessible under:
+
+* ``/_synapse/admin/v1``
+
+The only exception is the `/admin/whois` endpoint, which is
+`also available via the client-server API <https://matrix.org/docs/spec/client_server/r0.6.1#get-matrix-client-r0-admin-whois-userid>`_.
+
+The deprecation of the old endpoints was announced with Synapse 1.20.0 (released
+on 2020-09-22) and makes it easier for homeserver admins to lock down external
+access to the Admin API endpoints.
+
+Upgrading to v1.23.0
+====================
+
+Structured logging configuration breaking changes
+-------------------------------------------------
+
+This release deprecates use of the ``structured: true`` logging configuration for
+structured logging. If your logging configuration contains ``structured: true``
+then it should be modified based on the `structured logging documentation
+<https://github.com/matrix-org/synapse/blob/master/docs/structured_logging.md>`_.
+
+The ``structured`` and ``drains`` logging options are now deprecated and should
+be replaced by standard logging configuration of ``handlers`` and ``formatters``.
+
+A future will release of Synapse will make using ``structured: true`` an error.
+
+Upgrading to v1.22.0
+====================
+
+ThirdPartyEventRules breaking changes
+-------------------------------------
+
+This release introduces a backwards-incompatible change to modules making use of
+``ThirdPartyEventRules`` in Synapse. If you make use of a module defined under the
+``third_party_event_rules`` config option, please make sure it is updated to handle
+the below change:
+
+The ``http_client`` argument is no longer passed to modules as they are initialised. Instead,
+modules are expected to make use of the ``http_client`` property on the ``ModuleApi`` class.
+Modules are now passed a ``module_api`` argument during initialisation, which is an instance of
+``ModuleApi``. ``ModuleApi`` instances have a ``http_client`` property which acts the same as
+the ``http_client`` argument previously passed to ``ThirdPartyEventRules`` modules.
+
+Upgrading to v1.21.0
+====================
+
+Forwarding ``/_synapse/client`` through your reverse proxy
+----------------------------------------------------------
+
+The `reverse proxy documentation
+<https://github.com/matrix-org/synapse/blob/develop/docs/reverse_proxy.md>`_ has been updated
+to include reverse proxy directives for ``/_synapse/client/*`` endpoints. As the user password
+reset flow now uses endpoints under this prefix, **you must update your reverse proxy
+configurations for user password reset to work**.
+
+Additionally, note that the `Synapse worker documentation
+<https://github.com/matrix-org/synapse/blob/develop/docs/workers.md>`_ has been updated to
+ state that the ``/_synapse/client/password_reset/email/submit_token`` endpoint can be handled
+by all workers. If you make use of Synapse's worker feature, please update your reverse proxy
+configuration to reflect this change.
+
+New HTML templates
+------------------
+
+A new HTML template,
+`password_reset_confirmation.html <https://github.com/matrix-org/synapse/blob/develop/synapse/res/templates/password_reset_confirmation.html>`_,
+has been added to the ``synapse/res/templates`` directory. If you are using a
+custom template directory, you may want to copy the template over and modify it.
+
+Note that as of v1.20.0, templates do not need to be included in custom template
+directories for Synapse to start. The default templates will be used if a custom
+template cannot be found.
+
+This page will appear to the user after clicking a password reset link that has
+been emailed to them.
+
+To complete password reset, the page must include a way to make a `POST`
+request to
+``/_synapse/client/password_reset/{medium}/submit_token``
+with the query parameters from the original link, presented as a URL-encoded form. See the file
+itself for more details.
+
+Updated Single Sign-on HTML Templates
+-------------------------------------
+
+The ``saml_error.html`` template was removed from Synapse and replaced with the
+``sso_error.html`` template. If your Synapse is configured to use SAML and a
+custom ``sso_redirect_confirm_template_dir`` configuration then any customisations
+of the ``saml_error.html`` template will need to be merged into the ``sso_error.html``
+template. These templates are similar, but the parameters are slightly different:
+
+* The ``msg`` parameter should be renamed to ``error_description``.
+* There is no longer a ``code`` parameter for the response code.
+* A string ``error`` parameter is available that includes a short hint of why a
+  user is seeing the error page.
+
+Upgrading to v1.18.0
+====================
+
+Docker `-py3` suffix will be removed in future versions
+-------------------------------------------------------
+
+From 10th August 2020, we will no longer publish Docker images with the `-py3` tag suffix. The images tagged with the `-py3` suffix have been identical to the non-suffixed tags since release 0.99.0, and the suffix is obsolete.
+
+On 10th August, we will remove the `latest-py3` tag. Existing per-release tags (such as `v1.18.0-py3`) will not be removed, but no new `-py3` tags will be added.
+
+Scripts relying on the `-py3` suffix will need to be updated.
+
+Redis replication is now recommended in lieu of TCP replication
+---------------------------------------------------------------
+
+When setting up worker processes, we now recommend the use of a Redis server for replication. **The old direct TCP connection method is deprecated and will be removed in a future release.**
+See `docs/workers.md <docs/workers.md>`_ for more details.
 
 Upgrading to v1.14.0
 ====================

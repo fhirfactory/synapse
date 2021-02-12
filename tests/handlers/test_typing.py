@@ -15,17 +15,20 @@
 
 
 import json
+from typing import Dict
 
 from mock import ANY, Mock, call
 
 from twisted.internet import defer
+from twisted.web.resource import Resource
 
 from synapse.api.errors import AuthError
-from synapse.types import UserID
+from synapse.federation.transport.server import TransportLayerServer
+from synapse.types import UserID, create_requester
 
 from tests import unittest
+from tests.test_utils import make_awaitable
 from tests.unittest import override_config
-from tests.utils import register_federation_servlets
 
 # Some local users to test with
 U_APPLE = UserID.from_string("@apple:test")
@@ -52,8 +55,6 @@ def _make_edu_transaction_json(edu_type, content):
 
 
 class TypingNotificationsTestCase(unittest.HomeserverTestCase):
-    servlets = [register_federation_servlets]
-
     def make_homeserver(self, reactor, clock):
         # we mock out the keyring so as to skip the authentication check on the
         # federation API call.
@@ -64,37 +65,22 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
         mock_federation_client = Mock(spec=["put_json"])
         mock_federation_client.put_json.return_value = defer.succeed((200, "OK"))
 
-        datastores = Mock()
-        datastores.main = Mock(
-            spec=[
-                # Bits that Federation needs
-                "prep_send_transaction",
-                "delivered_txn",
-                "get_received_txn_response",
-                "set_received_txn_response",
-                "get_destination_retry_timings",
-                "get_devices_by_remote",
-                "maybe_store_room_on_invite",
-                # Bits that user_directory needs
-                "get_user_directory_stream_pos",
-                "get_current_state_deltas",
-                "get_device_updates_by_remote",
-            ]
-        )
-
         # the tests assume that we are starting at unix time 1000
         reactor.pump((1000,))
 
         hs = self.setup_test_homeserver(
             notifier=Mock(),
-            http_client=mock_federation_client,
+            federation_http_client=mock_federation_client,
             keyring=mock_keyring,
             replication_streams={},
         )
 
-        hs.datastores = datastores
-
         return hs
+
+    def create_resource_dict(self) -> Dict[str, Resource]:
+        d = super().create_resource_dict()
+        d["/_matrix/federation"] = TransportLayerServer(self.hs)
+        return d
 
     def prepare(self, reactor, clock, hs):
         mock_notifier = hs.get_notifier()
@@ -111,12 +97,16 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
             "retry_interval": 0,
             "failure_ts": None,
         }
-        self.datastore.get_destination_retry_timings.return_value = defer.succeed(
-            retry_timings_res
+        self.datastore.get_destination_retry_timings = Mock(
+            return_value=defer.succeed(retry_timings_res)
         )
 
-        self.datastore.get_device_updates_by_remote.return_value = defer.succeed(
-            (0, [])
+        self.datastore.get_device_updates_by_remote = Mock(
+            return_value=make_awaitable((0, []))
+        )
+
+        self.datastore.get_destination_last_successful_stream_ordering = Mock(
+            return_value=make_awaitable(None)
         )
 
         def get_received_txn_response(*args):
@@ -126,9 +116,10 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         self.room_members = []
 
-        def check_user_in_room(room_id, user_id):
+        async def check_user_in_room(room_id, user_id):
             if user_id not in [u.to_string() for u in self.room_members]:
                 raise AuthError(401, "User is not in the room")
+            return None
 
         hs.get_auth().check_user_in_room = check_user_in_room
 
@@ -137,24 +128,28 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         self.datastore.get_joined_hosts_for_room = get_joined_hosts_for_room
 
-        def get_current_users_in_room(room_id):
+        async def get_users_in_room(room_id):
             return {str(u) for u in self.room_members}
 
-        hs.get_state_handler().get_current_users_in_room = get_current_users_in_room
+        self.datastore.get_users_in_room = get_users_in_room
 
-        self.datastore.get_user_directory_stream_pos.return_value = (
-            # we deliberately return a non-None stream pos to avoid doing an initial_spam
-            defer.succeed(1)
+        self.datastore.get_user_directory_stream_pos = Mock(
+            side_effect=(
+                # we deliberately return a non-None stream pos to avoid doing an initial_spam
+                lambda: make_awaitable(1)
+            )
         )
 
-        self.datastore.get_current_state_deltas.return_value = (0, None)
+        self.datastore.get_current_state_deltas = Mock(return_value=(0, None))
 
         self.datastore.get_to_device_stream_token = lambda: 0
-        self.datastore.get_new_device_msgs_for_remote = lambda *args, **kargs: defer.succeed(
+        self.datastore.get_new_device_msgs_for_remote = lambda *args, **kargs: make_awaitable(
             ([], 0)
         )
-        self.datastore.delete_device_msgs_for_remote = lambda *args, **kargs: None
-        self.datastore.set_received_txn_response = lambda *args, **kwargs: defer.succeed(
+        self.datastore.delete_device_msgs_for_remote = lambda *args, **kargs: make_awaitable(
+            None
+        )
+        self.datastore.set_received_txn_response = lambda *args, **kwargs: make_awaitable(
             None
         )
 
@@ -163,9 +158,12 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         self.assertEquals(self.event_source.get_current_key(), 0)
 
-        self.successResultOf(
+        self.get_success(
             self.handler.started_typing(
-                target_user=U_APPLE, auth_user=U_APPLE, room_id=ROOM_ID, timeout=20000
+                target_user=U_APPLE,
+                requester=create_requester(U_APPLE),
+                room_id=ROOM_ID,
+                timeout=20000,
             )
         )
 
@@ -190,13 +188,16 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
     def test_started_typing_remote_send(self):
         self.room_members = [U_APPLE, U_ONION]
 
-        self.successResultOf(
+        self.get_success(
             self.handler.started_typing(
-                target_user=U_APPLE, auth_user=U_APPLE, room_id=ROOM_ID, timeout=20000
+                target_user=U_APPLE,
+                requester=create_requester(U_APPLE),
+                room_id=ROOM_ID,
+                timeout=20000,
             )
         )
 
-        put_json = self.hs.get_http_client().put_json
+        put_json = self.hs.get_federation_http_client().put_json
         put_json.assert_called_once_with(
             "farm",
             path="/_matrix/federation/v1/send/1000000",
@@ -219,7 +220,7 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         self.assertEquals(self.event_source.get_current_key(), 0)
 
-        (request, channel) = self.make_request(
+        channel = self.make_request(
             "PUT",
             "/_matrix/federation/v1/send/1000000",
             _make_edu_transaction_json(
@@ -232,7 +233,6 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
             ),
             federation_auth_origin=b"farm",
         )
-        self.render(request)
         self.assertEqual(channel.code, 200)
 
         self.on_new_event.assert_has_calls([call("typing_key", 1, rooms=[ROOM_ID])])
@@ -265,15 +265,17 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         self.assertEquals(self.event_source.get_current_key(), 0)
 
-        self.successResultOf(
+        self.get_success(
             self.handler.stopped_typing(
-                target_user=U_APPLE, auth_user=U_APPLE, room_id=ROOM_ID
+                target_user=U_APPLE,
+                requester=create_requester(U_APPLE),
+                room_id=ROOM_ID,
             )
         )
 
         self.on_new_event.assert_has_calls([call("typing_key", 1, rooms=[ROOM_ID])])
 
-        put_json = self.hs.get_http_client().put_json
+        put_json = self.hs.get_federation_http_client().put_json
         put_json.assert_called_once_with(
             "farm",
             path="/_matrix/federation/v1/send/1000000",
@@ -305,9 +307,12 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         self.assertEquals(self.event_source.get_current_key(), 0)
 
-        self.successResultOf(
+        self.get_success(
             self.handler.started_typing(
-                target_user=U_APPLE, auth_user=U_APPLE, room_id=ROOM_ID, timeout=10000
+                target_user=U_APPLE,
+                requester=create_requester(U_APPLE),
+                room_id=ROOM_ID,
+                timeout=10000,
             )
         )
 
@@ -344,9 +349,12 @@ class TypingNotificationsTestCase(unittest.HomeserverTestCase):
 
         # SYN-230 - see if we can still set after timeout
 
-        self.successResultOf(
+        self.get_success(
             self.handler.started_typing(
-                target_user=U_APPLE, auth_user=U_APPLE, room_id=ROOM_ID, timeout=10000
+                target_user=U_APPLE,
+                requester=create_requester(U_APPLE),
+                room_id=ROOM_ID,
+                timeout=10000,
             )
         )
 

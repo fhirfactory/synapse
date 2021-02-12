@@ -99,7 +99,7 @@ class RoomDirectoryConfig(Config):
         #
         # Options for the rules include:
         #
-        #   user_id: Matches agaisnt the creator of the alias
+        #   user_id: Matches against the creator of the alias
         #   room_id: Matches against the room ID being published
         #   alias: Matches against any current local or canonical aliases
         #            associated with the room
@@ -149,7 +149,7 @@ class RoomDirectoryConfig(Config):
         return False
 
 
-class _RoomDirectoryRule(object):
+class _RoomDirectoryRule:
     """Helper class to test whether a room directory action is allowed, like
     creating an alias or publishing a room.
     """
@@ -180,7 +180,7 @@ class _RoomDirectoryRule(object):
             self._alias_regex = glob_to_regex(alias)
             self._room_id_regex = glob_to_regex(room_id)
         except Exception as e:
-            raise ConfigError("Failed to parse glob into regex: %s", e)
+            raise ConfigError("Failed to parse glob into regex") from e
 
     def matches(self, user_id, room_id, aliases):
         """Tests if this rule matches the given user_id, room_id and aliases.
