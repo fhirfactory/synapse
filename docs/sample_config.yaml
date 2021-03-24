@@ -2394,6 +2394,15 @@ spam_checker:
 
 ## Rooms ##
 
+# Controls whether locally-created rooms allow encryption.
+#
+# Defaults to 'true'.
+#
+# Note that this option will only affect rooms created after it is set. It
+# will also not affect rooms created by other servers.
+# encryption_enabled: true
+
+
 # Controls whether locally-created rooms should be end-to-end encrypted by
 # default.
 #

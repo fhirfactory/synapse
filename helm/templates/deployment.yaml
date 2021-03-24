@@ -93,8 +93,29 @@ spec:
             echo START of /var/lib/synapse/config/homeserver.yaml file content;
             echo ' ';
             cat /var/lib/synapse/config/homeserver.yaml;
+h            echo ' ';
+            echo END of /var/lib/synapse/config/homeserver.yaml file content;
+            echo Updating /var/lib/synapse/config/log.config file; 
+            [ -e /var/lib/synapse/config/log-with-placeholders.config ] || cp /var/lib/synapse/config/log.config /var/lib/synapse/config/log-with-placeholders.config;
+            /bin/cp -f /var/lib/synapse/config/log-with-placeholders.config /var/lib/synapse/config/log.config;
+            sed -i \"s/INFO/{{ .Values.matrixLogLevel | default "INFO" }}/\" /var/lib/synapse/config/log.config;
+            echo START of /var/lib/synapse/config/log.config file content;
             echo ' ';
-            echo END of /var/lib/synapse/config/homeserver.yaml file content;"
+            cat /var/lib/synapse/config/log.config;
+            echo ' ';
+            echo END of /var/lib/synapse/config/log.config file content;
+        {{- if (.Values.externalDnsEntry) }} 
+            echo '127.0.0.1 {{ .Values.externalDnsEntry }}' >> /etc/hosts;
+            echo START of /etc/hosts file content;
+            echo ' ';
+            cat /etc/hosts;
+            echo ' ';
+            echo END of /etc/hosts file content;
+            echo no_proxy=${no_proxy};
+            export no_proxy={{ .Values.externalDnsEntry }};
+            echo no_proxy=${no_proxy};
+        {{- end }}
+            "
         volumeMounts:
         - name: config
           mountPath: /var/lib/synapse/config
@@ -165,7 +186,7 @@ spec:
         resources:
           requests:
             memory: "{{ (add 128 .Values.jvmMaxHeapSizeMB) | default 2048 }}Mi"
-        image: matrixdotorg/synapse:{{ .Values.imageTag }}            
+        image: pegacorn/pegacorn-communicate-roomserver:{{ .Values.imageTag }}            
         imagePullPolicy: {{ .Values.imagePullPolicy | default "IfNotPresent" }}
         livenessProbe:
           httpGet:

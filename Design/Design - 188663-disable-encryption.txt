@@ -1,0 +1,30 @@
+188663-disable-encryption
+=================================================================
+
+To minimise the merge maintenance that this solution introduces, I was initially going to do the third party rules impl (see https://github.com/matrix-org/synapse/issues/4367#issuecomment-678366829 and https://github.com/matrix-org/synapse/issues/6660#issuecomment-738011092), until I saw that an additional change to rooms.py was also required.  This change could be pushed back to https://github.com/matrix-org/synapse and potentially address https://github.com/matrix-org/synapse/issues/4401. 
+
+Based on https://github.com/matrix-org/synapse/issues/4367#issuecomment-452772632, encryption was disabled by setting the required power level to enable encryption for a room to be an impossible value, when creating a new room.  Noting that this means the disabling of encryption will only affect rooms created after this change.  It will also not affect rooms created by other servers, if federation is enabled.
+ 
+Based on https://github.com/matrix-org/synapse/issues/4367#issuecomment-634219592, RoomEncryption events were stripped, logged and ignored.
+
+Both of the above two changes are conditional based on a new homeserver.yaml configuration value named "encryption_enabled", which defaults to true, so existing functionality is not affected.
+
+Based on
+1. https://github.com/vector-im/element-web/blob/develop/docs/e2ee.md#disabling-encryption-by-default
+2. https://github.com/matrix-org/matrix-react-sdk/pull/4605/files
+the /.well-known/matrix/client was updated to indicate to clients if encryption is enabled.  Noting that as mentioned at https://github.com/vector-im/element-web/issues/14079#issuecomment-775180051, clients use the "default_server_config" -> "m.homeserver" -> "server_name" as the domain name in the lookup of /.well-known/matrix/client.  If this is different to the domain in "default_server_config" -> "m.homeserver" -> "base_url", it is suggested that your client is updated to check the "base_url" locartion if the well-known config is not found for "server_name".
+
+These changes to the source code were applied to the synapse docker image, by copying the modified source over the top of the existing files.  This method only works if the changes made to the source code don't introduce new dependencies, that the synapse docker image doesn't already provide.
+
+
+Testing performed
+=================
+1. With no encryption_enabled value in the homeservice.yaml file, confirmed that https://pegacorn-communicate-roomserver.site-a:30880/.well-known/matrix/client returned "io.element.e2ee":{"default":"true"}
+2. With encryption_enabled: false in the homeservice.yaml file, confirmed that
+2.1 https://pegacorn-communicate-roomserver.site-a:30880/.well-known/matrix/client returned "io.element.e2ee":{"default":"false"}
+2.2 In element web created a new private room with encryption enabled ... confirmed that
+2.2.1 Room -> Settings -> Security & Privacy -> Encrypted is disabled
+2.2.2 In the synapse server logs saw:
+2.2.2.1 synapse.handlers.room - 906 - INFO - POST-739 - Removed RoomEncryption event for room_id=![room_id]:[homeserver server_name] created by @[user_id]:[homeserver server_name]
+2.2.2.2 synapse.handlers.room - 952 - DEBUG - POST-739 - power_level_content['events'][EventTypes.RoomEncryption]=101 for room_id=![room_id]:[homeserver server_name] created by @[user_id]:[homeserver server_name]
+2.2.2.3 Could see the unencrypted message sent in the room: synapse.storage.SQL - 306 - DEBUG - persist_events-7 - [SQL values] {persist_events-357} (... "type":"m.room.message","room_id":"![room_id]:[homeserver server_name]","sender":"@[user_id]:[homeserver server_name]","content":{"msgtype":"m.text","body":"my test message"} ...)
