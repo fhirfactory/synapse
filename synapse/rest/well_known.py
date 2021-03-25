@@ -41,6 +41,13 @@ class WellKnownBuilder:
                 "base_url": self._config.default_identity_server
             }
 
+        # Indicate to clients if encryption is enabled.  Based on
+        # 1. https://github.com/vector-im/element-web/blob/develop/docs/e2ee.md#disabling-encryption-by-default
+        # 2. https://github.com/matrix-org/matrix-react-sdk/pull/4605/files
+        result["io.element.e2ee"] = {
+            "default": str(self._config.encryption_enabled).lower()
+        }
+
         return result
 
 

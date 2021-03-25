@@ -105,7 +105,7 @@ class RoomCreationHandler(BaseHandler):
 
         # Modify presets to selectively enable encryption by default per homeserver config
         for preset_name, preset_config in self._presets_dict.items():
-            encrypted = (
+            encrypted = self.config.encryption_enabled and (
                 preset_name
                 in self.config.encryption_enabled_by_default_for_room_presets
             )
@@ -892,6 +892,19 @@ class RoomCreationHandler(BaseHandler):
             content=creator_join_profile,
         )
 
+        room_encryption_power_level = 100
+
+        if (not self.config.encryption_enabled):
+            # Disable room encryption by setting the required power level to be an impossible value 
+            # Based on https://github.com/matrix-org/synapse/issues/4367#issuecomment-452772632
+            room_encryption_power_level = 101
+
+            # Strip RoomEncryption events
+            # Based on https://github.com/matrix-org/synapse/issues/4367#issuecomment-634219592
+            pl_content = initial_state.pop((EventTypes.RoomEncryption, ""), None)
+            if pl_content is not None:
+                logger.info("Removed RoomEncryption event for room_id=%s created by %s", room_id, creator_id)
+        
         # We treat the power levels override specially as this needs to be one
         # of the first events that get sent into a room.
         pl_content = initial_state.pop((EventTypes.PowerLevels, ""), None)
@@ -911,7 +924,7 @@ class RoomCreationHandler(BaseHandler):
                     EventTypes.RoomAvatar: 50,
                     EventTypes.Tombstone: 100,
                     EventTypes.ServerACL: 100,
-                    EventTypes.RoomEncryption: 100,
+                    EventTypes.RoomEncryption: room_encryption_power_level,
                 },
                 "events_default": 0,
                 "state_default": 50,
@@ -934,6 +947,14 @@ class RoomCreationHandler(BaseHandler):
             last_sent_stream_id = await send(
                 etype=EventTypes.PowerLevels, content=power_level_content
             )
+
+            if (not self.config.encryption_enabled):
+                logger.debug(
+                    "power_level_content['events'][EventTypes.RoomEncryption]=%s for room_id=%s created by %s",
+                    power_level_content["events"][EventTypes.RoomEncryption],
+                    room_id, 
+                    creator_id
+                )
 
         if room_alias and (EventTypes.CanonicalAlias, "") not in initial_state:
             last_sent_stream_id = await send(
