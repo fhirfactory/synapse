@@ -174,7 +174,7 @@ class ServerConfig(Config):
         # false only if we are updating the user directory in a worker
         self.update_user_directory = config.get("update_user_directory", True)
 
-        # Controls whether locally-created rooms allow encryption.
+        # Controls whether locally-created rooms (e.g. rooms created on this matrix server) allow encryption.
         self.encryption_enabled = config.get("encryption_enabled", True)
 
         # whether to enable the media repository endpoints. This should be set
