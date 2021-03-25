@@ -186,7 +186,7 @@ spec:
         resources:
           requests:
             memory: "{{ (add 128 .Values.jvmMaxHeapSizeMB) | default 2048 }}Mi"
-        image: pegacorn/pegacorn-communicate-roomserver:{{ .Values.imageTag }}            
+        image: {{ .Values.dockerRepo }}pegacorn-communicate-roomserver:{{ .Values.imageTag }}            
         imagePullPolicy: {{ .Values.imagePullPolicy | default "IfNotPresent" }}
         livenessProbe:
           httpGet:

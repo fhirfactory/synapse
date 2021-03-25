@@ -80,7 +80,7 @@ Build and deploy
 ================
 E:
 cd \dev\github\pegacorn-communicate-serverside-roomserver
-docker build --rm -t pegacorn/pegacorn-communicate-roomserver:1.0.0-snapshot .
+docker build --rm --build-arg IMAGE_BUILD_TIMESTAMP="%date% %time%" -t pegacorn-communicate-roomserver:1.0.0-snapshot .
 \helm\helm upgrade pegacorn-communicate-roomserver-site-a --install --namespace site-a --set serviceName=pegacorn-communicate-roomserver,basePort=30880,hostPathCerts=/data/certificates,hostPath=/data/synapse,imageTag=1.0.0-snapshot,matrixServerName=chs.local.gov.au,matrixLogLevel=DEBUG,allowPasswordLogin=true,numOfPods=1 helm
 
 On the container these are the file locations:
