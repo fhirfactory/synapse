@@ -1,7 +1,7 @@
 188663-disable-encryption
 =================================================================
 
-To minimise the merge maintenance that this solution introduces, I was initially going to do the third party rules impl (see https://github.com/matrix-org/synapse/issues/4367#issuecomment-678366829 and https://github.com/matrix-org/synapse/issues/6660#issuecomment-738011092), until I saw that an additional change to rooms.py was also required.  This change could be pushed back to https://github.com/matrix-org/synapse and potentially address https://github.com/matrix-org/synapse/issues/4401. 
+To minimise the merge maintenance that this solution introduces, I was initially going to do the third party rules impl (see https://github.com/matrix-org/synapse/issues/4367#issuecomment-678366829 and https://github.com/matrix-org/synapse/issues/6660#issuecomment-738011092), until I saw that an additional change to rooms.py was also required which increases merge conflict from matrix master if this methodology is used. In long term this could be implemented and this change could be pushed back to https://github.com/matrix-org/synapse and potentially address https://github.com/matrix-org/synapse/issues/4401. 
 
 Based on https://github.com/matrix-org/synapse/issues/4367#issuecomment-452772632, encryption was disabled by setting the required power level to enable encryption for a room to be an impossible value, when creating a new room.  Noting that this means the disabling of encryption will only affect rooms created after this change.  It will also not affect rooms created by other servers, if federation is enabled.
  
@@ -12,7 +12,7 @@ Both of the above two changes are conditional based on a new homeserver.yaml con
 Based on
 1. https://github.com/vector-im/element-web/blob/develop/docs/e2ee.md#disabling-encryption-by-default
 2. https://github.com/matrix-org/matrix-react-sdk/pull/4605/files
-the /.well-known/matrix/client was updated to indicate to clients if encryption is enabled.  Noting that as mentioned at https://github.com/vector-im/element-web/issues/14079#issuecomment-775180051, clients use the "default_server_config" -> "m.homeserver" -> "server_name" as the domain name in the lookup of /.well-known/matrix/client.  If this is different to the domain in "default_server_config" -> "m.homeserver" -> "base_url", it is suggested that your client is updated to check the "base_url" locartion if the well-known config is not found for "server_name".
+the /.well-known/matrix/client was updated to indicate to clients if encryption is enabled.  Noting that as mentioned at https://github.com/vector-im/element-web/issues/14079#issuecomment-775180051, clients use the "default_server_config" -> "m.homeserver" -> "server_name" as the domain name in the lookup of /.well-known/matrix/client.  If this is different to the domain in "default_server_config" -> "m.homeserver" -> "base_url", it is suggested that your client is updated to check the "base_url" location if the well-known config is not found for "server_name".
 
 These changes to the source code were applied to the synapse docker image, by copying the modified source over the top of the existing files.  This method only works if the changes made to the source code don't introduce new dependencies, that the synapse docker image doesn't already provide.
 
