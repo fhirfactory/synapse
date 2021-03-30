@@ -90,6 +90,21 @@ spec:
             sed -i \"s/<macaroonSecretKey>/${MACAROON_SECRET_KEY}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<formSecret>/${FORM_SECRET}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<AllowPasswordLogin>/{{ .Values.allowPasswordLogin | default "false" }}/\" /var/lib/synapse/config/homeserver.yaml;
+        {{- if (.Values.turnURLs) }} 
+            sed -i '/turn_uris:/ a turn_allow_guests: {{ .Values.turnAllowGuests | default "true" }} \\' /var/lib/synapse/config/homeserver.yaml;
+            sed -i '/turn_uris:/ a turn_shared_secret: \"{{ .Values.turnSharedSecret }}\" \\' /var/lib/synapse/config/homeserver.yaml;
+            sed -i '/turn_uris:/ a turn_user_lifetime: {{ .Values.turnUserLifetime | default "1h" }} \\' /var/lib/synapse/config/homeserver.yaml;
+          {{- range (split "^" .Values.turnURLs) }}
+            sed -i '/turn_uris:/ a\\  - \"{{ . }}\" ' /var/lib/synapse/config/homeserver.yaml;            
+          {{- end }}
+            sed -i '/#turn_uris:/ a turn_uris: ' /var/lib/synapse/config/homeserver.yaml;
+        {{- end }}
+        {{- if (.Values.clientProtocolHostNameAndPorts) }} 
+          {{- range (split "^" .Values.clientProtocolHostNameAndPorts) }}
+            sed -i '/client_whitelist:/ a\\      - {{ . }} ' /var/lib/synapse/config/homeserver.yaml;
+          {{- end }}
+            sed -i '/#client_whitelist:/ a\\    client_whitelist: ' /var/lib/synapse/config/homeserver.yaml;
+        {{- end }}
             echo START of /var/lib/synapse/config/homeserver.yaml file content;
             echo ' ';
             cat /var/lib/synapse/config/homeserver.yaml;
