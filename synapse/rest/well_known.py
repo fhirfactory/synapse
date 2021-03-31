@@ -44,8 +44,13 @@ class WellKnownBuilder:
         # Indicate to clients if encryption is enabled.  Based on
         # 1. https://github.com/vector-im/element-web/blob/develop/docs/e2ee.md#disabling-encryption-by-default
         # 2. https://github.com/matrix-org/matrix-react-sdk/pull/4605/files
+        # add a new option of "enabled" to specify if encryption is not supported/allowed on the room server  
+        encryptionIsDisabled = (str(self._config.encryption_enabled).lower() == "false") 
+        # compare to false, so a missing value will result in encryptionIsEnabled = true 
+        encryptionIsEnabled = not encryptionIsDisabled
         result["io.element.e2ee"] = {
-            "default": str(self._config.encryption_enabled).lower()
+            "default": encryptionIsEnabled,
+            "enabled": encryptionIsEnabled
         }
 
         return result
