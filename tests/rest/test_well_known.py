@@ -38,6 +38,6 @@ class WellKnownTests(unittest.HomeserverTestCase):
             {
                 "m.homeserver": {"base_url": "https://tesths"},
                 "m.identity_server": {"base_url": "https://testis"},
-                "io.element.e2ee": {"default": "true"},
+                "io.element.e2ee": {"default": true, "enabled": true},
             },
         )
