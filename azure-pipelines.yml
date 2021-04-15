@@ -6,6 +6,9 @@
 trigger:
 - master
 
+pr:
+- master
+
 variables:
 # Could potentially parse this from  $(Build.Repository.Name) = fhirfactory/pegacorn
 #  dockerImageName: '$(Build.Repository.Name)'
