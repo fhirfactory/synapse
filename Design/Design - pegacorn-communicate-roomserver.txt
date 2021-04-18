@@ -83,7 +83,7 @@ cd \dev\github\pegacorn-communicate-serverside-roomserver
 copy /Y \dev\aether-host-files\LocalWorkstations\certificates\ca.cer docker\ca-local.cer
 copy /Y \dev\aether-host-files\TEST\certificates\ca-root.cer docker\ca-root-org.cer
 docker build --rm --build-arg IMAGE_BUILD_TIMESTAMP="%date% %time%" -t pegacorn-communicate-roomserver:1.0.0-snapshot .
-\helm\helm upgrade pegacorn-communicate-roomserver-site-a --install --namespace site-a --set serviceName=pegacorn-communicate-roomserver,basePort=30880,hostPathCerts=/data/certificates,hostPath=/data/synapse,imageTag=1.0.0-snapshot,matrixServerName=chs.local.gov.au,clientProtocolHostNameAndPorts="https://pegacorn-communicate-web.site-a:30890/",matrixLogLevel=DEBUG,allowPasswordLogin=true,numOfPods=1 helm
+\helm\helm upgrade pegacorn-communicate-roomserver-site-a --install --namespace site-a --set serviceName=pegacorn-communicate-roomserver,basePort=30880,hostPathCerts=/data/certificates,hostPath=/data/synapse,imageTag=1.0.0-snapshot,matrixServerName=chs.local.gov.au,clientProtocolHostNameAndPorts="https://pegacorn-communicate-web.site-a:30890/^http://localhost:8080/",pushGwyHostName=pegacorn-communicate-push-gateway.site-a,pushGwySvcIP=[CLUSTER-IP of kubectl get svc pegacorn-communicate-push-gateway -n site-a],matrixLogLevel=DEBUG,allowPasswordLogin=true,numOfPods=1 helm
 
 On the container these are the file locations:
 	certificates - /var/lib/synapse/certificates
