@@ -31,7 +31,7 @@ steps:
     buildTimestamp=$(TZ='Australia/Sydney' date --rfc-3339='seconds')
     cd $(System.DefaultWorkingDirectory)/pegacorn-communicate-serverside-roomserver
     cp -rf ../aether-host-files/LocalWorkstations/certificates/ca.cer docker/ca-local.cer
-    cp -rf ../aether-host-files/TEST/certificates/ca-root.cer docker\ca-root-org.cer
+    cp -rf ../aether-host-files/TEST/certificates/ca-root.cer docker/ca-root-org.cer
 - task: Docker@2
   displayName: 'Build a docker image'
   inputs:
