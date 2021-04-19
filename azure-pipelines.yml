@@ -3,6 +3,12 @@
 # Add steps that build, run tests, deploy, and more:
 # https://aka.ms/yaml
 
+resources:
+  repositories:
+  - repository: aether-host-files
+    type: git
+    name: Pegacorn/aether-host-files
+    
 trigger:
 - master
 
@@ -20,8 +26,12 @@ pool:
 
 steps:
 - checkout: self
+- checkout: aether-host-files
 - bash: |
     buildTimestamp=$(TZ='Australia/Sydney' date --rfc-3339='seconds')
+    cd $(System.DefaultWorkingDirectory)/pegacorn-communicate-serverside-roomserver
+    cp -rf ../aether-host-files/LocalWorkstations/certificates/ca.cer docker/ca-local.cer
+    cp -rf ../aether-host-files/TEST/certificates/ca-root.cer docker/ca-root-org.cer
 - task: Docker@2
   displayName: 'Build a docker image'
   inputs:
@@ -29,7 +39,7 @@ steps:
     repository: '$(dockerImageName)'
     tags: '$(projectVersion)'
     command: 'build'
-    Dockerfile: 'Dockerfile'
+    Dockerfile: 'pegacorn-communicate-serverside-roomserver/Dockerfile'
     arguments: '--build-arg IMAGE_BUILD_TIMESTAMP="$(buildTimestamp)"'
 - task: Docker@2
   displayName: 'Push a docker image'

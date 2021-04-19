@@ -37,6 +37,12 @@ spec:
 #                operator: In
 #                values:
 #                - High
+    {{- if (.Values.pushGwyHostName) }} 
+      hostAliases:
+        - ip: {{ .Values.pushGwySvcIP }}
+          hostnames:
+          - {{ .Values.pushGwyHostName }}
+    {{- end }}
       initContainers:
       - env:
         - name: AZURE_TENANT_ID
@@ -102,8 +108,13 @@ spec:
         {{- if (.Values.clientProtocolHostNameAndPorts) }} 
           {{- range (split "^" .Values.clientProtocolHostNameAndPorts) }}
             sed -i '/client_whitelist:/ a\\      - {{ . }} ' /var/lib/synapse/config/homeserver.yaml;
+            sed -i '/client_whitelist:/ a\\      - {{ . }}# ' /var/lib/synapse/config/homeserver.yaml;
           {{- end }}
             sed -i '/#client_whitelist:/ a\\    client_whitelist: ' /var/lib/synapse/config/homeserver.yaml;
+        {{- end }}
+        {{- if (.Values.pushGwySvcIP) }} 
+            sed -i \"/#ip_range_whitelist:/ a\\  - '{{ .Values.pushGwySvcIP }}' \" /var/lib/synapse/config/homeserver.yaml;
+            sed -i '/#ip_range_whitelist:/ a\\ip_range_whitelist: ' /var/lib/synapse/config/homeserver.yaml;
         {{- end }}
             echo START of /var/lib/synapse/config/homeserver.yaml file content;
             echo ' ';
@@ -119,17 +130,6 @@ spec:
             cat /var/lib/synapse/config/log.config;
             echo ' ';
             echo END of /var/lib/synapse/config/log.config file content;
-        {{- if (.Values.externalDnsEntry) }} 
-            echo '127.0.0.1 {{ .Values.externalDnsEntry }}' >> /etc/hosts;
-            echo START of /etc/hosts file content;
-            echo ' ';
-            cat /etc/hosts;
-            echo ' ';
-            echo END of /etc/hosts file content;
-            echo no_proxy=${no_proxy};
-            export no_proxy={{ .Values.externalDnsEntry }};
-            echo no_proxy=${no_proxy};
-        {{- end }}
             "
         volumeMounts:
         - name: config
@@ -137,10 +137,14 @@ spec:
       containers:
       - env:
         {{- if (.Values.httpProxyHostAndPort) }} 
-        - name: HTTP_PROXY
+        - name: http_proxy
           value: {{ .Values.httpProxyHostAndPort }}
         - name: HTTPS_PROXY
           value: {{ .Values.httpProxyHostAndPort }}
+         {{- if (.Values.pushGwyHostName) }} 
+        - name: no_proxy
+          value: {{ .Values.pushGwyHostName }}
+         {{- end }}
         {{- end }}
         - name: SYNAPSE_CONFIG_DIR
           value: /var/lib/synapse/config
