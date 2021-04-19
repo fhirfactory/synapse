@@ -607,7 +607,18 @@ class ServerConfig(Config):
             users_new_default_push_rules
         )  # type: set
 
-        # Whitelist of domain names that given next_link parameters must have
+       # List of push rules to be overridden based on config value "default_to_all_notification_rules_from_homeserver"
+        override_default_push_rules = config.get("override_default_push_rules")
+       
+        # Turn the list into a set to improve lookup speed.
+        self.override_default_push_rules = set(
+            override_default_push_rules or []
+        )  # type: set
+        # check if given list is valid otherwise throw exception.
+        if not isinstance(override_default_push_rules, list):
+            raise ConfigError("rules to be turned off' must be a list")
+
+       # Whitelist of domain names that given next_link parameters must have
         next_link_domain_whitelist = config.get(
             "next_link_domain_whitelist"
         )  # type: Optional[List[str]]

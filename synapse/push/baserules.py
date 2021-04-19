@@ -19,6 +19,7 @@ from typing import Any, Dict, List
 
 from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MAP
 
+from synapse.config.server import override_default_push_rules
 
 def list_with_base_rules(
     rawrules: List[Dict[str, Any]], use_new_defaults: bool = False
@@ -270,6 +271,8 @@ BASE_APPEND_OVERRIDE_RULES = [
     },
     {
         "rule_id": "global/override/.m.rule.tombstone",
+        "default": False,
+        "enabled": False,
         "conditions": [
             {
                 "kind": "event_match",
@@ -284,7 +287,7 @@ BASE_APPEND_OVERRIDE_RULES = [
                 "_id": "_tombstone_statekey",
             },
         ],
-        "actions": ["notify", {"set_tweak": "highlight", "value": True}],
+        "actions": ["dont_notify"],
     },
     {
         "rule_id": "global/override/.m.rule.reaction",
@@ -388,11 +391,7 @@ NEW_APPEND_OVERRIDE_RULES = [
                 "_id": "_tombstone_statekey",
             },
         ],
-        "actions": [
-            "notify",
-            {"set_tweak": "sound", "value": "default"},
-            {"set_tweak": "highlight"},
-        ],
+        "actions": ["dont_notify"],
     },
     {
         "rule_id": "global/override/.m.rule.roomnotif",
@@ -470,6 +469,8 @@ BASE_APPEND_UNDERRIDE_RULES = [
     # but are encrypted (e.g. m.call.*)...
     {
         "rule_id": "global/underride/.m.rule.encrypted_room_one_to_one",
+         "default": False,
+         "enabled": True,
         "conditions": [
             {"kind": "room_member_count", "is": "2", "_id": "member_count"},
             {
@@ -495,12 +496,14 @@ BASE_APPEND_UNDERRIDE_RULES = [
                 "_id": "_message",
             }
         ],
-        "actions": ["notify", {"set_tweak": "highlight", "value": False}],
+        "actions": ["dont_notify"],
     },
     # XXX: this is going to fire for events which aren't m.room.messages
     # but are encrypted (e.g. m.call.*)...
     {
         "rule_id": "global/underride/.m.rule.encrypted",
+        "default": False,
+        "enabled": True,
         "conditions": [
             {
                 "kind": "event_match",
@@ -509,7 +512,7 @@ BASE_APPEND_UNDERRIDE_RULES = [
                 "_id": "_encrypted",
             }
         ],
-        "actions": ["notify", {"set_tweak": "highlight", "value": False}],
+        "actions": ["dont_notify"],
     },
     {
         "rule_id": "global/underride/.im.vector.jitsi",
@@ -590,6 +593,17 @@ for r in BASE_APPEND_UNDERRIDE_RULES:
     r["default"] = True
     BASE_RULE_IDS.add(r["rule_id"])
 
+if len(override_default_push_rules) == 0:
+    for r in BASE_RULE_IDS:
+        for override_rules in override_default_push_rules:
+            if override_rules in r["rule_id"]
+            r["default"] = False
+            r["actions"] = "dont_notify"
+            "m.rule.tombstone" in r["rule_id"]
+            #alternative approach where we try to find exact match in string
+            elif r["rule_id"].index('.m.rule.encrypted_room_one_to_one') or r["rule_id"].index('.m.rule.encrypted') or r["rule_id"].index('m.rule.tombstone'):
+                r["enabled"] = False
+                r["default"] = False
 
 NEW_RULE_IDS = set()
 
