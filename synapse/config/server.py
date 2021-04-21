@@ -616,7 +616,7 @@ class ServerConfig(Config):
         )  # type: set
         # check if given list is valid otherwise throw exception.
         if not isinstance(override_default_push_rules, list):
-            raise ConfigError("rules to be turned off' must be a list")
+            raise ConfigError("'override_default_push_rules' must be a list")
 
        # Whitelist of domain names that given next_link parameters must have
         next_link_domain_whitelist = config.get(
