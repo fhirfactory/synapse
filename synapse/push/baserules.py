@@ -591,25 +591,25 @@ for r in BASE_APPEND_OVERRIDE_RULES:
 for r in BASE_APPEND_UNDERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["underride"]
     r["default"] = True
-    BASE_RULE_IDS.add(r["rule_id"])
-    default_push_rules = [".m.rule.room_one_to_one", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
+    override_config_push_rules = [".m.rule.tombstone", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
     logger.debug("Found the following override rules [%s]", r)
-    for override_rules in default_push_rules:
+    for override_rules in override_config_push_rules:
         logger.debug("base rule ids were found to be: {}".format(r))
         logger.debug("override rule ids were found to be: {}".format(override_rules))
         if override_rules in r:
-            r["actions"] = ["dont_notify"]
+            r["actions"] = "dont_notify"
             r["enabled"] = False
+    BASE_RULE_IDS.add(r["rule_id"])
 
 
 # for r in BASE_RULE_IDS:
-#     default_push_rules = [".m.rule.room_one_to_one", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
+#     override_config_push_rules = [".m.rule.room_one_to_one", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
 #     logger.debug("Found the following override rules [%s]", r)
-#     for override_rules in default_push_rules:
+#     for override_rules in override_config_push_rules:
 #         logger.debug("base rule ids were found to be: {}".format(r))
 #         logger.debug("override rule ids were found to be: {}".format(override_rules))
 #         if override_rules in r:
-#             r["actions"] = ["dont_notify"]
+#             r["actions"] = "dont_notify"
 #             r["enabled"] = False
 
 NEW_RULE_IDS = set()
