@@ -7,6 +7,7 @@ COPY synapse/config/server.py /usr/local/lib/python3.8/site-packages/synapse/con
 COPY synapse/handlers/room.py /usr/local/lib/python3.8/site-packages/synapse/handlers/room.py
 COPY synapse/http/proxyagent.py /usr/local/lib/python3.8/site-packages/synapse/http/proxyagent.py
 COPY synapse/push/baserules.py /usr/local/lib/python3.8/site-packages/synapse/push/baserules.py
+COPY synapse/rest/client/v1/push_rule.py /usr/local/lib/python3.8/site-packages/synapse/rest/client/v1/push_rule.py
 
 # Install our root certificates
 COPY docker/ca-local.cer /usr/local/share/ca-certificates/ca-local.crt
