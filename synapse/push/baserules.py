@@ -14,11 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import copy
 from typing import Any, Dict, List
 
 from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MAP
-from synapse.config.server import override_default_push_rules
+# from synapse.config.server import override_default_push_rules
+
+logger = logging.getLogger("baserules")
 
 def list_with_base_rules(
     rawrules: List[Dict[str, Any]], use_new_defaults: bool = False
@@ -592,15 +595,17 @@ for r in BASE_APPEND_UNDERRIDE_RULES:
 
 
 for r in BASE_RULE_IDS:
-    for override_rules in override_default_push_rules:
-        if override_rules in r["rule_id"]
-        r["actions"] = "dont_notify"
-        #alternative approach where we try to find exact match in string
+    default_push_rules = [".m.rule.room_one_to_one", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
+    for override_rules in default_push_rules:
+        logger.debug("base rule ids were found to be: {}".format(r))
+        logger.debug("override rule ids were found to be: {}".format(override_rules))
+        if override_rules in r["rule_id"]:
+            r["actions"] = "dont_notify"
+            r["enabled"] = False
+            #alternative approach where we try to find exact match in string
         elif r["rule_id"].index('.m.rule.encrypted_room_one_to_one') or r["rule_id"].index('.m.rule.encrypted') or r["rule_id"].index('m.rule.tombstone'):
-        r["enabled"] = False
-        r["actions"] = "dont_notify"
-        logger.debug("base rule ids were found to be: {}", ).format(r)
-        logger.debug("override rule ids were found to be: {}", ).format(override_rules)
+            r["actions"] = "dont_notify"
+            r["enabled"] = False
 
 NEW_RULE_IDS = set()
 
