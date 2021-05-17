@@ -6,6 +6,7 @@ FROM matrixdotorg/synapse:v1.26.0
 COPY synapse/config/server.py /usr/local/lib/python3.8/site-packages/synapse/config/server.py
 COPY synapse/handlers/room.py /usr/local/lib/python3.8/site-packages/synapse/handlers/room.py
 COPY synapse/http/proxyagent.py /usr/local/lib/python3.8/site-packages/synapse/http/proxyagent.py
+COPY synapse/push/baserules.py /usr/local/lib/python3.8/site-packages/synapse/push/baserules.py
 
 # Install our root certificates
 COPY docker/ca-local.cer /usr/local/share/ca-certificates/ca-local.crt
