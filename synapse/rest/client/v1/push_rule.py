@@ -161,19 +161,6 @@ class PushRuleRestServlet(RestServlet):
         self.notifier.on_new_event("push_rules_key", stream_id, users=[user_id])
 
     async def set_rule_attr(self, user_id, spec, val):
-     
-    # When user decides to not apply default push rules reset array for base_rule_ids as not every server/client
-    # Base rules is going to be the difference of list
-    push_rules_must_be_enabled = False
-    for findDisabledRules in self._users_disabled_push_rules:
-    for baseRule in BASE_RULE_IDS:
-    if baseRule.find(findDisabledRules.rule_id) != -1:
-    push_rules_must_be_enabled = True
-    if push_rules_must_be_enabled:
-    baseRule
-    baseRules["default"] = False
-    BASE_RULE_IDS["actions"] = "dont_notify"
-
         if spec["attr"] not in ("enabled", "actions"):
             # for the sake of potential future expansion, shouldn't report
             # 404 in the case of an unknown request so check it corresponds to
@@ -189,8 +176,6 @@ class PushRuleRestServlet(RestServlet):
         if spec["attr"] == "enabled":
             if isinstance(val, dict) and "enabled" in val:
                 val = val["enabled"]
-                if _users_override_default_push_rules:
-                if spec["attr"] == not attr["enabled"]
             if not isinstance(val, bool):
                 # Legacy fallback
                 # This should *actually* take a dict, but many clients pass
