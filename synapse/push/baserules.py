@@ -19,8 +19,8 @@ import copy
 from typing import Any, Dict, List
 
 from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MAP
-# from synapse.config.server import override_default_push_rules
 
+override_config_push_rules = [".m.rule.tombstone", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
 logger = logging.getLogger("baserules")
 
 def list_with_base_rules(
@@ -576,41 +576,42 @@ BASE_RULE_IDS = set()
 for r in BASE_APPEND_CONTENT_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["content"]
     r["default"] = True
+    # if push rules are configured then disable that push rule
+    if any(id in r["rule_id"] for id in override_config_push_rules):
+        r["enabled"] = False,
+        r["actions"] = ["dont_notify"]
+        logger.debug("Found following base append rules [%s]", r) 
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_PREPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
+    # if push rules are configured then disable that push rule
+    if any(id in r["rule_id"] for id in override_config_push_rules):
+        r["enabled"] = False,
+        r["actions"] = ["dont_notify"]
+        logger.debug("Found following base prepend override rules [%s]", r) 
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
+    # if push rules are configured then disable that push rule
+    if any(id in r["rule_id"] for id in override_config_push_rules):
+        r["enabled"] = False,
+        r["actions"] = ["dont_notify"]
+        logger.debug("Found the following base append override rules [%s]", r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_UNDERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["underride"]
     r["default"] = True
-    override_config_push_rules = [".m.rule.tombstone", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
-    logger.debug("Found the following override rules [%s]", r)
-    for override_rules in override_config_push_rules:
-        logger.debug("base rule ids were found to be: {}".format(r))
-        logger.debug("override rule ids were found to be: {}".format(override_rules))
-        if override_rules in r:
-            r["actions"] = "dont_notify"
-            r["enabled"] = False
+    # if push rules are configured then disable that push rule
+    if any(id in r["rule_id"] for id in override_config_push_rules):
+        r["enabled"] = False,
+        r["actions"] = ["dont_notify"]
+        logger.debug("Found following base append underride rules [%s]", r)
     BASE_RULE_IDS.add(r["rule_id"])
-
-
-# for r in BASE_RULE_IDS:
-#     override_config_push_rules = [".m.rule.room_one_to_one", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
-#     logger.debug("Found the following override rules [%s]", r)
-#     for override_rules in override_config_push_rules:
-#         logger.debug("base rule ids were found to be: {}".format(r))
-#         logger.debug("override rule ids were found to be: {}".format(override_rules))
-#         if override_rules in r:
-#             r["actions"] = "dont_notify"
-#             r["enabled"] = False
 
 NEW_RULE_IDS = set()
 
