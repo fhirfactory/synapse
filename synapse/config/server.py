@@ -607,16 +607,19 @@ class ServerConfig(Config):
             users_new_default_push_rules
         )  # type: set
 
-       # List of push rules to be overridden based on config value "default_to_all_notification_rules_from_homeserver"
-        override_default_push_rules = config.get("override_default_push_rules")
+       # List of push rules in default push rules list can be overridden with flag
+       # "override_default_push_rules" so that pre configured default push rules are
+       # not enforced to client apps and handled appropriately
+        override_default_push_rules = config.get("override_default_push_rules") or []
+
+        # check if given list is valid otherwise throw exception.
+        if not isinstance(override_default_push_rules, list):
+            raise ConfigError("'override_default_push_rules' must be a list")
        
         # Turn the list into a set to improve lookup speed.
         self.override_default_push_rules = set(
             override_default_push_rules or []
         )  # type: set
-        # check if given list is valid otherwise throw exception.
-        if not isinstance(override_default_push_rules, list):
-            raise ConfigError("'override_default_push_rules' must be a list")
 
        # Whitelist of domain names that given next_link parameters must have
         next_link_domain_whitelist = config.get(
