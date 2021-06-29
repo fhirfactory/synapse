@@ -195,8 +195,7 @@ class PushRuleRestServlet(RestServlet):
                     rule_ids = NEW_RULE_IDS
                 elif self._users_override_default_push_rules:
                     # make rule ids that are not provided in config "_users_override_default_push_rules" list
-                    # rules that are to override matrix default push rules are defined in homeserver 
-                    # with config parameter '_users_override_default_push_rules'
+                    # rules that are in homeserver config are supposed to be disabled(off)
                     rule_ids = [rule_id for rule_id in BASE_RULE_IDS if not any(id in rule_id for id in self._users_override_default_push_rules)]
                 else:
                     rule_ids = BASE_RULE_IDS

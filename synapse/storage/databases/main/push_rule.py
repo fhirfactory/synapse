@@ -103,6 +103,7 @@ class PushRulesWorkerStore(
         )
 
         self._users_new_default_push_rules = hs.config.users_new_default_push_rules
+        self._users_override_default_push_rules = hs.config.override_default_push_rules
 
     @abc.abstractmethod
     def get_max_push_rules_stream_id(self):

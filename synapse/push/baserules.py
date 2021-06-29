@@ -20,8 +20,13 @@ from typing import Any, Dict, List
 
 from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MAP
 
-override_config_push_rules = [".m.rule.tombstone", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
 logger = logging.getLogger("baserules")
+base_rules_disabled = [".m.rule.tombstone", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
+
+def populate_disabled_pushrules_from_config(pushrules: any):
+    global base_rules_disabled
+    for i in pushrules:
+        base_rules_disabled.append(i)
 
 def list_with_base_rules(
     rawrules: List[Dict[str, Any]], use_new_defaults: bool = False
@@ -577,37 +582,38 @@ for r in BASE_APPEND_CONTENT_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["content"]
     r["default"] = True
     # if push rules are configured then disable that push rule
-    if any(id in r["rule_id"] for id in override_config_push_rules):
+    # https://stackoverflow.com/questions/53123719/how-to-compare-two-lists-to-keep-matching-substrings
+    if any(id in r["rule_id"] for id in base_rules_disabled):
         r["enabled"] = False,
         r["actions"] = ["dont_notify"]
-        logger.debug("Found following base append rules [%s]", r) 
+        # logger.debug("Found following base append rules [%s]", r) 
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_PREPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
     # if push rules are configured then disable that push rule
-    if any(id in r["rule_id"] for id in override_config_push_rules):
+    if any(id in r["rule_id"] for id in base_rules_disabled):
         r["enabled"] = False,
         r["actions"] = ["dont_notify"]
-        logger.debug("Found following base prepend override rules [%s]", r) 
+        # logger.debug("Found following base prepend override rules [%s]", r) 
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
     # if push rules are configured then disable that push rule
-    if any(id in r["rule_id"] for id in override_config_push_rules):
+    if any(id in r["rule_id"] for id in base_rules_disabled):
         r["enabled"] = False,
         r["actions"] = ["dont_notify"]
-        logger.debug("Found the following base append override rules [%s]", r)
+        # logger.debug("Found the following base append override rules [%s]", r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_UNDERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["underride"]
     r["default"] = True
     # if push rules are configured then disable that push rule
-    if any(id in r["rule_id"] for id in override_config_push_rules):
+    if any(id in r["rule_id"] for id in base_rules_disabled):
         r["enabled"] = False,
         r["actions"] = ["dont_notify"]
         logger.debug("Found following base append underride rules [%s]", r)
