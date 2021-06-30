@@ -1,3 +1,4 @@
+
 ==================================================================================================================
                                     Push rules configurations
 ==================================================================================================================
@@ -12,11 +13,11 @@
 - `NEW_APPEND_UNDERRIDE_RULES`
 - `NEW_APPEND_OVERRIDE_RULES`
 
-3. A third implementation has been introduced where client consuming api needs to provide a list of push notifications from default notification rules such as `m.rule.tombstone` as an example would need to be passed in list format which are read to override in `roomserver/baserule.py` as well as `server.py` and `pushrules.py` in `Get, PUT` api context to always be turned off.
-override_default_push_rules: 
+3. A third implementation `BASE_CONFIGURED_OVERRIDE_RULE_IDS` has been introduced where client consuming api needs to provide a list of push notifications from default notification rules such as `m.rule.tombstone` as an example would need to be passed in list format which are read to override in `roomserver/baserule.py` as well as `server.py` and `pushrules.py` in `Get, PUT` api context to always be turned off.
+BASE_CONFIGURED_OVERRIDE_RULE_IDS: 
   - '.m.rule.tombstone'
   - '.m.rule.encrypted'
-  - '.m.rule.encrypted_room_one_to_one/'
+  - '.m.rule.encrypted_room_one_to_one'
 
-  Please look into corresponding front end applicatioon which consumes these push rules for more push rules definitions and what they mean. These push rules are either turned on, off or set to noisy in client side by default. There are other more than 10 push rules and the ones which needs to be disabled can be passed as parameter of flag `override_default_push_rules` which is `List`. Roomserver converts `override_default_push_rules` and uses configured value in `baserules.py` file to turn off push rules. Not providing any values in that list would automatically default all default push rules to matrix default ones. It also does not impact push rules specified in 2) which are controlled only by `users_new_default_push_rules` configured and combines both default rules as well as new rules configured through this flag.
+  Please look into corresponding front end applicatioon which consumes these push rules for more push rules definitions and what they mean. These push rules are either turned on, off or set to noisy in client side by default. There are other more than 10 push rules and the ones which needs to be disabled can be passed as parameter of flag `BASE_CONFIGURED_OVERRIDE_RULE_IDS` which is `List`. Roomserver converts `BASE_CONFIGURED_OVERRIDE_RULE_IDS` and uses configured value in `baserules.py` file to turn off push rules. Not providing any values in that list would automatically default all default push rules to matrix default ones. It also does not impact push rules specified in 2) which are controlled only by `users_new_default_push_rules` configured and combines both default rules as well as new rules configured through this flag.
 
