@@ -21,12 +21,12 @@ from typing import Any, Dict, List
 from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MAP
 
 logger = logging.getLogger("baserules")
-base_rules_disabled = [".m.rule.tombstone", ".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
 
 def populate_disabled_pushrules_from_config(pushrules: any):
-    global base_rules_disabled
+    global BASE_RULES_CONFIGURED_DEFAULTS
     for i in pushrules:
-        base_rules_disabled.append(i)
+        BASE_RULES_CONFIGURED_DEFAULTS = []
+        BASE_RULES_CONFIGURED_DEFAULTS.append(i)
 
 def list_with_base_rules(
     rawrules: List[Dict[str, Any]], use_new_defaults: bool = False
@@ -159,6 +159,35 @@ def make_base_prepend_rules(
             r["actions"] = modified["actions"]
 
     return rules
+
+# checks if client has decided to to have
+# a different push notifications within "override_default_push_rules"
+# array or even hardcoded ones defined in BASE_RULES_CONFIGURED_DEFAULTS
+def changeConfiguredDefaultPushrules(r):
+# Default push rules can be changed from homeserver config as well
+# so based on client's preference set it to disabled, enabled, noisy
+# as necessary
+    if any(id in r["rule_id"] for id in disabledPushRules):
+        r["enabled"] = False,
+        r["actions"] = ["dont_notify"]
+        logger.debug("Found following overridden rules in config [%s]", r)
+    
+    return r
+
+# xxx This can be further worked on to pull config from homeserver config
+# to override matrix default push rules (enable for enabled rules below and
+# disable for disabled rules below ). This enables clients to configure push 
+# rules be set to noisy, on, off as required
+
+
+BASE_RULES_CONFIGURED_DEFAULTS = [
+    {
+        "enabled": ["m.rule.tombstone"]
+    },
+    {
+        "disabled": [".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
+    }
+]
 
 
 BASE_APPEND_CONTENT_RULES = [
@@ -575,48 +604,39 @@ NEW_APPEND_UNDERRIDE_RULES = [
     },
 ]
 
+   
+enabledPushRules = []
+disabledPushRules = []
+for rule in BASE_RULES_CONFIGURED_DEFAULTS:
+    for r in rule.get("enabled", []):
+        enabledPushRules.append(r)
+    for r in rule.get("disabled", []):
+        disabledPushRules.append(r)
 
 BASE_RULE_IDS = set()
 
 for r in BASE_APPEND_CONTENT_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["content"]
     r["default"] = True
-    # if push rules are configured then disable that push rule
-    # https://stackoverflow.com/questions/53123719/how-to-compare-two-lists-to-keep-matching-substrings
-    if any(id in r["rule_id"] for id in base_rules_disabled):
-        r["enabled"] = False,
-        r["actions"] = ["dont_notify"]
-        # logger.debug("Found following base append rules [%s]", r) 
+    changeConfiguredDefaultPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_PREPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
-    # if push rules are configured then disable that push rule
-    if any(id in r["rule_id"] for id in base_rules_disabled):
-        r["enabled"] = False,
-        r["actions"] = ["dont_notify"]
-        # logger.debug("Found following base prepend override rules [%s]", r) 
+    changeConfiguredDefaultPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
-    # if push rules are configured then disable that push rule
-    if any(id in r["rule_id"] for id in base_rules_disabled):
-        r["enabled"] = False,
-        r["actions"] = ["dont_notify"]
-        # logger.debug("Found the following base append override rules [%s]", r)
+    changeConfiguredDefaultPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_UNDERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["underride"]
     r["default"] = True
-    # if push rules are configured then disable that push rule
-    if any(id in r["rule_id"] for id in base_rules_disabled):
-        r["enabled"] = False,
-        r["actions"] = ["dont_notify"]
-        logger.debug("Found following base append underride rules [%s]", r)
+    changeConfiguredDefaultPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 NEW_RULE_IDS = set()
