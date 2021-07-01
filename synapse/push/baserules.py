@@ -22,7 +22,7 @@ from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MA
 
 logger = logging.getLogger("baserules")
 
-def populate_disabled_pushrules_from_config(pushrules: any):
+def populate_disabled_pushrules_from_config(pushrules: List[Dict[str, Any]]):
     global BASE_CONFIGURED_OVERRIDE_RULE_IDS
     for i in pushrules:
         BASE_CONFIGURED_OVERRIDE_RULE_IDS = []
@@ -167,13 +167,13 @@ def changeConfiguredDefaultPushrules(r):
 # Default push rules can be changed from homeserver config as well
 # so based on client's preference set it to disabled, enabled, noisy
 # as necessary
-    if any(id in r["rule_id"] for id in disabledPushRules):
+    if any(id in r["rule_id"] for id in disabledPushrulesFromConfig):
         r["enabled"] = False,
         r["actions"] = ["dont_notify"]
         logger.debug("Found following overridden rules in config [%s]", r)
-    elif any(id in r["rule_id"] for id in enabledPushRules):
+    elif any(id in r["rule_id"] for id in enabledPushrulesFromConfig):
         r["enabled"] = True
-    elif any(id in r["rule_id"] for id in actions):
+    elif any(id in r["rule_id"] for id in pushrulesActionsFromConfig):
         r["actions"] = ["notify", {"set_tweak": "highlight", "value": True}]
     
     return r
@@ -614,16 +614,16 @@ NEW_APPEND_UNDERRIDE_RULES = [
 ]
 
    
-enabledPushRules = []
-disabledPushRules = []
-actions = []
+enabledPushrulesFromConfig = []
+pushrulesActionsFromConfig = []
+disabledPushrulesFromConfig = []
 for rule in BASE_CONFIGURED_OVERRIDE_RULE_IDS:
     for r in rule.get("enabled", []):
-        enabledPushRules.append(r)
+        enabledPushrulesFromConfig.append(r)
     for r in rule.get("disabled", []):
-        disabledPushRules.append(r)
+        disabledPushrulesFromConfig.append(r)
     for r in rule.get("actions", []):
-        disabledPushRules.append(r)
+        pushrulesActionsFromConfig.append(r)
 
 BASE_RULE_IDS = set()
 

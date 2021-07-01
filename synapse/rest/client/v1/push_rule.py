@@ -194,9 +194,14 @@ class PushRuleRestServlet(RestServlet):
                 if user_id in self._users_new_default_push_rules:
                     rule_ids = NEW_RULE_IDS
                 elif self._users_override_default_push_rules:
-                    # make rule ids that are not provided in config "_users_override_default_push_rules" list
-                    # rules that are in homeserver config are supposed to be disabled(off)
-                    rule_ids = [rule_id for rule_id in BASE_RULE_IDS if not any(id in rule_id for id in self._users_override_default_push_rules)]
+                    # If client has configured default push rules in homeserver config
+                    # then do not allow changing those push rules setting defaults by
+                    # checking them through. In this case it will throw 500 response 
+                    # while user tries to change push rules
+                    pushrules_configured_to_override_default = set()
+                    for rule in self._users_override_default_push_rules:
+                        pushrules_configured_to_override_default = rule.get("enabled", []) + rule.get("disabled", []) + rule.get("actions", [])
+                    rule_ids = [rule_id for rule_id in BASE_RULE_IDS if not any(id in rule_id for id in pushrules_configured_to_override_default)]
                 else:
                     rule_ids = BASE_RULE_IDS
 
