@@ -171,6 +171,10 @@ def changeConfiguredDefaultPushrules(r):
         r["enabled"] = False,
         r["actions"] = ["dont_notify"]
         logger.debug("Found following overridden rules in config [%s]", r)
+    elif any(id in r["rule_id"] for id in enabledPushRules):
+        r["enabled"] = True
+    elif any(id in r["rule_id"] for id in actions):
+        r["actions"] = ["notify", {"set_tweak": "highlight", "value": True}]
     
     return r
 
@@ -182,10 +186,15 @@ def changeConfiguredDefaultPushrules(r):
 
 BASE_CONFIGURED_OVERRIDE_RULE_IDS = [
     {
-        "enabled": [".m.rule.tombstone"]
+        "enabled":[".m.rule.tombstone"]
     },
     {
-        "disabled": [".m.rule.encrypted_room_one_to_one", ".m.rule.encrypted"]
+    "disabled":[
+        ".m.rule.encrypted_room_one_to_one",
+        ".m.rule.encrypted"]
+    },
+    {
+   "actions":[".m.rule.tombstone"]
     }
 ]
 
@@ -607,10 +616,13 @@ NEW_APPEND_UNDERRIDE_RULES = [
    
 enabledPushRules = []
 disabledPushRules = []
+actions = []
 for rule in BASE_CONFIGURED_OVERRIDE_RULE_IDS:
     for r in rule.get("enabled", []):
         enabledPushRules.append(r)
     for r in rule.get("disabled", []):
+        disabledPushRules.append(r)
+    for r in rule.get("actions", []):
         disabledPushRules.append(r)
 
 BASE_RULE_IDS = set()
