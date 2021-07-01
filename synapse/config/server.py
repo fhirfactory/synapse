@@ -617,9 +617,7 @@ class ServerConfig(Config):
             raise ConfigError("'override_default_push_rules' must be a list")
        
         # Turn the list into a set to improve lookup speed.
-        self.override_default_push_rules = set(
-            override_default_push_rules or []
-        )  # type: set
+        self.override_default_push_rules = override_default_push_rules # type : list
 
        # Whitelist of domain names that given next_link parameters must have
         next_link_domain_whitelist = config.get(
