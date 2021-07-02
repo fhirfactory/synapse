@@ -163,20 +163,30 @@ def make_base_prepend_rules(
 # checks if client has configured to have a
 # a different push notifications within "override_default_push_rules"
 # array or hardcoded values in BASE_CONFIGURED_OVERRIDE_RULE_IDS
-def changeConfiguredDefaultPushrules(r):
+def applyDefaultPushrulesConfigured(rules):
+    enabledPushrulesFromConfig = []
+    pushrulesActionsFromConfig = []
+    disabledPushrulesFromConfig = []
+    for rule in BASE_CONFIGURED_OVERRIDE_RULE_IDS:
+        for r in rule.get("enabled", []):
+            enabledPushrulesFromConfig.append(r)
+        for r in rule.get("disabled", []):
+            disabledPushrulesFromConfig.append(r)
+        for r in rule.get("actions", []):
+            pushrulesActionsFromConfig.append(r)
 # Default push rules can be changed from homeserver config as well
 # so based on client's preference set it to disabled, enabled, noisy
 # as necessary
-    if any(id in r["rule_id"] for id in disabledPushrulesFromConfig):
-        r["enabled"] = False,
-        r["actions"] = ["dont_notify"]
-        logger.debug("Found following overridden rules in config [%s]", r)
-    elif any(id in r["rule_id"] for id in enabledPushrulesFromConfig):
-        r["enabled"] = True
-    elif any(id in r["rule_id"] for id in pushrulesActionsFromConfig):
-        r["actions"] = ["notify", {"set_tweak": "highlight", "value": True}]
+    if any(id in rules["rule_id"] for id in disabledPushrulesFromConfig):
+        rules["enabled"] = False,
+        rules["actions"] = ["dont_notify"]
+        logger.debug("Found following overridden rules in config [%s]", rule)
+    elif any(id in rules["rule_id"] for id in enabledPushrulesFromConfig):
+        rules["enabled"] = True
+    elif any(id in rules["rule_id"] for id in pushrulesActionsFromConfig):
+        rules["actions"] = ["notify", {"set_tweak": "highlight", "value": True}]
     
-    return r
+    return rules
 
 # xxx This can be further worked on to pull config from homeserver config
 # to override matrix default push rules (enable for enabled rules below and
@@ -613,42 +623,31 @@ NEW_APPEND_UNDERRIDE_RULES = [
     },
 ]
 
-   
-enabledPushrulesFromConfig = []
-pushrulesActionsFromConfig = []
-disabledPushrulesFromConfig = []
-for rule in BASE_CONFIGURED_OVERRIDE_RULE_IDS:
-    for r in rule.get("enabled", []):
-        enabledPushrulesFromConfig.append(r)
-    for r in rule.get("disabled", []):
-        disabledPushrulesFromConfig.append(r)
-    for r in rule.get("actions", []):
-        pushrulesActionsFromConfig.append(r)
 
 BASE_RULE_IDS = set()
 
 for r in BASE_APPEND_CONTENT_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["content"]
     r["default"] = True
-    changeConfiguredDefaultPushrules(r)
+    applyDefaultPushrulesConfigured(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_PREPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
-    changeConfiguredDefaultPushrules(r)
+    applyDefaultPushrulesConfigured(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
-    changeConfiguredDefaultPushrules(r)
+    applyDefaultPushrulesConfigured(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_UNDERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["underride"]
     r["default"] = True
-    changeConfiguredDefaultPushrules(r)
+    applyDefaultPushrulesConfigured(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 NEW_RULE_IDS = set()
