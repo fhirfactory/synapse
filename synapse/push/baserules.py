@@ -14,11 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import copy
 from typing import Any, Dict, List
 
 from synapse.push.rulekinds import PRIORITY_CLASS_INVERSE_MAP, PRIORITY_CLASS_MAP
 
+logger = logging.getLogger("baserules")
+
+def populate_disabled_pushrules_from_config(pushrules: List[Dict[str, Any]]):
+    global BASE_CONFIGURED_OVERRIDE_RULE_IDS
+    for i in pushrules:
+        BASE_CONFIGURED_OVERRIDE_RULE_IDS = []
+        BASE_CONFIGURED_OVERRIDE_RULE_IDS.append(i)
 
 def list_with_base_rules(
     rawrules: List[Dict[str, Any]], use_new_defaults: bool = False
@@ -151,6 +159,54 @@ def make_base_prepend_rules(
             r["actions"] = modified["actions"]
 
     return rules
+
+# checks if client has configured to have a
+# a different push notifications within "override_default_push_rules"
+# array or hardcoded values in BASE_CONFIGURED_OVERRIDE_RULE_IDS
+def modifyDefaultPushrulesFromConfiguredPushrules(rules):
+    enabledPushrulesFromConfig = []
+    pushrulesActionsFromConfig = []
+    disabledPushrulesFromConfig = []
+    for rule in BASE_CONFIGURED_OVERRIDE_RULE_IDS:
+        for r in rule.get("enabled", []):
+            enabledPushrulesFromConfig.append(r)
+        for r in rule.get("disabled", []):
+            disabledPushrulesFromConfig.append(r)
+        for r in rule.get("actions", []):
+            pushrulesActionsFromConfig.append(r)
+# Default push rules can be changed from homeserver config as well
+# so based on client's preference set it to disabled, enabled, noisy
+# as necessary
+    if any(id in rules["rule_id"] for id in disabledPushrulesFromConfig):
+        rules["enabled"] = False,
+        rules["actions"] = ["dont_notify"]
+        logger.debug("Found following overridden rules in config [%s]", rule)
+    elif any(id in rules["rule_id"] for id in enabledPushrulesFromConfig):
+        rules["enabled"] = True
+    elif any(id in rules["rule_id"] for id in pushrulesActionsFromConfig):
+        rules["actions"] = ["notify", {"set_tweak": "highlight", "value": True}]
+    
+    return rules
+
+# xxx This can be further worked on to pull config from homeserver config
+# to override matrix default push rules (enable for enabled rules below and
+# disable for disabled rules below ). This enables clients to configure push 
+# rules be set to noisy, on, off as required
+
+
+BASE_CONFIGURED_OVERRIDE_RULE_IDS = [
+    {
+        "enabled":[".m.rule.tombstone"]
+    },
+    {
+    "disabled":[
+        ".m.rule.encrypted_room_one_to_one",
+        ".m.rule.encrypted"]
+    },
+    {
+   "actions":[".m.rule.tombstone"]
+    }
+]
 
 
 BASE_APPEND_CONTENT_RULES = [
@@ -573,23 +629,26 @@ BASE_RULE_IDS = set()
 for r in BASE_APPEND_CONTENT_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["content"]
     r["default"] = True
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_PREPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_UNDERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["underride"]
     r["default"] = True
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
-
 
 NEW_RULE_IDS = set()
 

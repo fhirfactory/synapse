@@ -45,6 +45,7 @@ class PushRuleRestServlet(RestServlet):
         self._is_worker = hs.config.worker_app is not None
 
         self._users_new_default_push_rules = hs.config.users_new_default_push_rules
+        self._users_override_default_push_rules = hs.config.override_default_push_rules
 
     async def on_PUT(self, request, path):
         if self._is_worker:
@@ -192,6 +193,15 @@ class PushRuleRestServlet(RestServlet):
             if is_default_rule:
                 if user_id in self._users_new_default_push_rules:
                     rule_ids = NEW_RULE_IDS
+                elif self._users_override_default_push_rules:
+                    # If client has configured default push rules in homeserver config
+                    # then do not allow changing those push rules setting defaults by
+                    # checking them through. In this case it will throw 500 response 
+                    # while user tries to change push rules
+                    pushrules_configured_to_override_default = set()
+                    for rule in self._users_override_default_push_rules:
+                        pushrules_configured_to_override_default = rule.get("enabled", []) + rule.get("disabled", []) + rule.get("actions", [])
+                    rule_ids = [rule_id for rule_id in BASE_RULE_IDS if not any(id in rule_id for id in pushrules_configured_to_override_default)]
                 else:
                     rule_ids = BASE_RULE_IDS
 
