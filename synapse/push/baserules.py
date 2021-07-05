@@ -163,7 +163,7 @@ def make_base_prepend_rules(
 # checks if client has configured to have a
 # a different push notifications within "override_default_push_rules"
 # array or hardcoded values in BASE_CONFIGURED_OVERRIDE_RULE_IDS
-def applyDefaultPushrulesConfigured(rules):
+def modifyDefaultPushrulesFromConfiguredPushrules(rules):
     enabledPushrulesFromConfig = []
     pushrulesActionsFromConfig = []
     disabledPushrulesFromConfig = []
@@ -629,25 +629,25 @@ BASE_RULE_IDS = set()
 for r in BASE_APPEND_CONTENT_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["content"]
     r["default"] = True
-    applyDefaultPushrulesConfigured(r)
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_PREPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
-    applyDefaultPushrulesConfigured(r)
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_OVERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["override"]
     r["default"] = True
-    applyDefaultPushrulesConfigured(r)
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 for r in BASE_APPEND_UNDERRIDE_RULES:
     r["priority_class"] = PRIORITY_CLASS_MAP["underride"]
     r["default"] = True
-    applyDefaultPushrulesConfigured(r)
+    modifyDefaultPushrulesFromConfiguredPushrules(r)
     BASE_RULE_IDS.add(r["rule_id"])
 
 NEW_RULE_IDS = set()
