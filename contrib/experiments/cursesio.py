@@ -46,14 +46,14 @@ class CursesStdIO:
         self.callback = callback
 
     def fileno(self):
-        """ We want to select on FD 0 """
+        """We want to select on FD 0"""
         return 0
 
     def connectionLost(self, reason):
         self.close()
 
     def print_line(self, text):
-        """ add a line to the internal list of lines"""
+        """add a line to the internal list of lines"""
 
         self.lines.append(text)
         self.redraw()
@@ -63,8 +63,7 @@ class CursesStdIO:
         self.redraw()
 
     def redraw(self):
-        """ method for redisplaying lines
-            based on internal list of lines """
+        """method for redisplaying lines based on internal list of lines"""
 
         self.stdscr.clear()
         self.paintStatus(self.statusText)
@@ -93,7 +92,7 @@ class CursesStdIO:
         )
 
     def doRead(self):
-        """ Input is ready! """
+        """Input is ready!"""
         curses.noecho()
         c = self.stdscr.getch()  # read a character
 
@@ -133,7 +132,7 @@ class CursesStdIO:
         return "CursesStdIO"
 
     def close(self):
-        """ clean up """
+        """clean up"""
 
         curses.nocbreak()
         self.stdscr.keypad(0)

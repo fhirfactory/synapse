@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017, 2018 New Vector Ltd
 # Copyright 2019 The Matrix.org Foundation C.I.C.
 #
@@ -20,19 +19,17 @@ from synapse.api.errors import SynapseError
 from synapse.metrics.background_process_metrics import run_as_background_process
 from synapse.types import Requester, UserID, create_requester
 
-from ._base import BaseHandler
-
 if TYPE_CHECKING:
-    from synapse.app.homeserver import HomeServer
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
 
-class DeactivateAccountHandler(BaseHandler):
+class DeactivateAccountHandler:
     """Handler which deals with deactivating user accounts."""
 
     def __init__(self, hs: "HomeServer"):
-        super().__init__(hs)
+        self.store = hs.get_datastore()
         self.hs = hs
         self._auth_handler = hs.get_auth_handler()
         self._device_handler = hs.get_device_handler()
@@ -47,10 +44,12 @@ class DeactivateAccountHandler(BaseHandler):
 
         # Start the user parter loop so it can resume parting users from rooms where
         # it left off (if it has work left to do).
-        if hs.config.run_background_tasks:
+        if hs.config.worker.run_background_tasks:
             hs.get_reactor().callWhenRunning(self._start_user_parting)
 
-        self._account_validity_enabled = hs.config.account_validity.enabled
+        self._account_validity_enabled = (
+            hs.config.account_validity.account_validity_enabled
+        )
 
     async def deactivate_account(
         self,
@@ -120,12 +119,17 @@ class DeactivateAccountHandler(BaseHandler):
 
         await self.store.user_set_password_hash(user_id, None)
 
+        # Most of the pushers will have been deleted when we logged out the
+        # associated devices above, but we still need to delete pushers not
+        # associated with devices, e.g. email pushers.
+        await self.store.delete_all_pushers_for_user(user_id)
+
         # Add the user to a table of users pending deactivation (ie.
         # removal from all the rooms they're a member of)
         await self.store.add_user_pending_deactivation(user_id)
 
         # delete from user directory
-        await self.user_directory_handler.handle_user_deactivated(user_id)
+        await self.user_directory_handler.handle_local_user_deactivated(user_id)
 
         # Mark the user as erased, if they asked for that
         if erase_data:
@@ -196,8 +200,7 @@ class DeactivateAccountHandler(BaseHandler):
             run_as_background_process("user_parter_loop", self._user_parter_loop)
 
     async def _user_parter_loop(self) -> None:
-        """Loop that parts deactivated users from rooms
-        """
+        """Loop that parts deactivated users from rooms"""
         self._user_parter_running = True
         logger.info("Starting user parter")
         try:
@@ -214,8 +217,7 @@ class DeactivateAccountHandler(BaseHandler):
             self._user_parter_running = False
 
     async def _part_user(self, user_id: str) -> None:
-        """Causes the given user_id to leave all the rooms they're joined to
-        """
+        """Causes the given user_id to leave all the rooms they're joined to"""
         user = UserID.from_string(user_id)
 
         rooms_for_user = await self.store.get_rooms_for_user(user_id)
@@ -251,16 +253,16 @@ class DeactivateAccountHandler(BaseHandler):
         Args:
             user_id: ID of user to be re-activated
         """
-        # Add the user to the directory, if necessary.
         user = UserID.from_string(user_id)
-        if self.hs.config.user_directory_search_all_users:
-            profile = await self.store.get_profileinfo(user.localpart)
-            await self.user_directory_handler.handle_local_profile_change(
-                user_id, profile
-            )
 
         # Ensure the user is not marked as erased.
         await self.store.mark_user_not_erased(user_id)
 
         # Mark the user as active.
         await self.store.set_user_deactivated_status(user_id, False)
+
+        # Add the user to the directory, if necessary. Note that
+        # this must be done after the user is re-activated, because
+        # deactivated users are excluded from the user directory.
+        profile = await self.store.get_profileinfo(user.localpart)
+        await self.user_directory_handler.handle_local_profile_change(user_id, profile)

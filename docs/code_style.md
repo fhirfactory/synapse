@@ -8,46 +8,46 @@ errors in code.
 
 The necessary tools are detailed below.
 
+First install them with:
+
+```sh
+pip install -e ".[lint,mypy]"
+```
+
 -   **black**
 
     The Synapse codebase uses [black](https://pypi.org/project/black/)
     as an opinionated code formatter, ensuring all comitted code is
     properly formatted.
 
-    First install `black` with:
-
-        pip install --upgrade black
-
     Have `black` auto-format your code (it shouldn't change any
     functionality) with:
 
-        black . --exclude="\.tox|build|env"
+    ```sh
+    black . --exclude="\.tox|build|env"
+    ```
 
 -   **flake8**
 
     `flake8` is a code checking tool. We require code to pass `flake8`
     before being merged into the codebase.
 
-    Install `flake8` with:
-
-        pip install --upgrade flake8 flake8-comprehensions
-
     Check all application and test code with:
 
-        flake8 synapse tests
+    ```sh
+    flake8 synapse tests
+    ```
 
 -   **isort**
 
     `isort` ensures imports are nicely formatted, and can suggest and
     auto-fix issues such as double-importing.
 
-    Install `isort` with:
-
-        pip install --upgrade isort
-
     Auto-fix imports with:
 
-        isort -rc synapse tests
+    ```sh
+    isort -rc synapse tests
+    ```
 
     `-rc` means to recursively search the given directories.
 
@@ -74,15 +74,19 @@ save as it takes a while and is very resource intensive.
 
         Example:
 
-            from synapse.types import UserID
-            ...
-            user_id = UserID(local, server)
+        ```python
+        from synapse.types import UserID
+        ...
+        user_id = UserID(local, server)
+        ```
 
         is preferred over:
 
-            from synapse import types
-            ...
-            user_id = types.UserID(local, server)
+        ```python
+        from synapse import types
+        ...
+        user_id = types.UserID(local, server)
+        ```
 
         (or any other variant).
 
@@ -136,31 +140,36 @@ Some guidelines follow:
     will be if no sub-options are enabled).
 -   Lines should be wrapped at 80 characters.
 -   Use two-space indents.
+-   `true` and `false` are spelt thus (as opposed to `True`, etc.)
+-   Use single quotes (`'`) rather than double-quotes (`"`) or backticks
+    (`` ` ``) to refer to configuration options.
 
 Example:
 
-    ## Frobnication ##
+```yaml
+## Frobnication ##
 
-    # The frobnicator will ensure that all requests are fully frobnicated.
-    # To enable it, uncomment the following.
-    #
-    #frobnicator_enabled: true
+# The frobnicator will ensure that all requests are fully frobnicated.
+# To enable it, uncomment the following.
+#
+#frobnicator_enabled: true
 
-    # By default, the frobnicator will frobnicate with the default frobber.
-    # The following will make it use an alternative frobber.
-    #
-    #frobincator_frobber: special_frobber
+# By default, the frobnicator will frobnicate with the default frobber.
+# The following will make it use an alternative frobber.
+#
+#frobincator_frobber: special_frobber
 
-    # Settings for the frobber
-    #
-    frobber:
-      # frobbing speed. Defaults to 1.
-      #
-      #speed: 10
+# Settings for the frobber
+#
+frobber:
+  # frobbing speed. Defaults to 1.
+  #
+  #speed: 10
 
-      # frobbing distance. Defaults to 1000.
-      #
-      #distance: 100
+  # frobbing distance. Defaults to 1000.
+  #
+  #distance: 100
+```
 
 Note that the sample configuration is generated from the synapse code
 and is maintained by a script, `scripts-dev/generate_sample_config`.

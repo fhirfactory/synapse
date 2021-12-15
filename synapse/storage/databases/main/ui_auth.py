@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import attr
 
+from synapse.api.constants import LoginType
 from synapse.api.errors import StoreError
 from synapse.storage._base import SQLBaseStore, db_to_json
 from synapse.storage.database import LoggingTransaction
@@ -44,7 +44,11 @@ class UIAuthWorkerStore(SQLBaseStore):
     """
 
     async def create_ui_auth_session(
-        self, clientdict: JsonDict, uri: str, method: str, description: str,
+        self,
+        clientdict: JsonDict,
+        uri: str,
+        method: str,
+        description: str,
     ) -> UIAuthSessionData:
         """
         Creates a new user interactive authentication session.
@@ -123,7 +127,10 @@ class UIAuthWorkerStore(SQLBaseStore):
         return UIAuthSessionData(session_id, **result)
 
     async def mark_ui_auth_stage_complete(
-        self, session_id: str, stage_type: str, result: Union[str, bool, JsonDict],
+        self,
+        session_id: str,
+        stage_type: str,
+        result: Union[str, bool, JsonDict],
     ):
         """
         Mark a session stage as completed.
@@ -218,12 +225,12 @@ class UIAuthWorkerStore(SQLBaseStore):
         self, txn: LoggingTransaction, session_id: str, key: str, value: Any
     ):
         # Get the current value.
-        result = self.db_pool.simple_select_one_txn(
+        result: Dict[str, Any] = self.db_pool.simple_select_one_txn(  # type: ignore
             txn,
             table="ui_auth_sessions",
             keyvalues={"session_id": session_id},
             retcols=("serverdict",),
-        )  # type: Dict[str, Any]  # type: ignore
+        )
 
         # Update it and add it back to the database.
         serverdict = db_to_json(result["serverdict"])
@@ -261,10 +268,12 @@ class UIAuthWorkerStore(SQLBaseStore):
         return serverdict.get(key, default)
 
     async def add_user_agent_ip_to_ui_auth_session(
-        self, session_id: str, user_agent: str, ip: str,
+        self,
+        session_id: str,
+        user_agent: str,
+        ip: str,
     ):
-        """Add the given user agent / IP to the tracking table
-        """
+        """Add the given user agent / IP to the tracking table"""
         await self.db_pool.simple_upsert(
             table="ui_auth_sessions_ips",
             keyvalues={"session_id": session_id, "user_agent": user_agent, "ip": ip},
@@ -273,7 +282,8 @@ class UIAuthWorkerStore(SQLBaseStore):
         )
 
     async def get_user_agents_ips_to_ui_auth_session(
-        self, session_id: str,
+        self,
+        session_id: str,
     ) -> List[Tuple[str, str]]:
         """Get the given user agents / IPs used during the ui auth process
 
@@ -316,16 +326,58 @@ class UIAuthWorkerStore(SQLBaseStore):
             txn,
             table="ui_auth_sessions_ips",
             column="session_id",
-            iterable=session_ids,
+            values=session_ids,
             keyvalues={},
         )
+
+        # If a registration token was used, decrement the pending counter
+        # before deleting the session.
+        rows = self.db_pool.simple_select_many_txn(
+            txn,
+            table="ui_auth_sessions_credentials",
+            column="session_id",
+            iterable=session_ids,
+            keyvalues={"stage_type": LoginType.REGISTRATION_TOKEN},
+            retcols=["result"],
+        )
+
+        # Get the tokens used and how much pending needs to be decremented by.
+        token_counts: Dict[str, int] = {}
+        for r in rows:
+            # If registration was successfully completed, the result of the
+            # registration token stage for that session will be True.
+            # If a token was used to authenticate, but registration was
+            # never completed, the result will be the token used.
+            token = db_to_json(r["result"])
+            if isinstance(token, str):
+                token_counts[token] = token_counts.get(token, 0) + 1
+
+        # Update the `pending` counters.
+        if len(token_counts) > 0:
+            token_rows = self.db_pool.simple_select_many_txn(
+                txn,
+                table="registration_tokens",
+                column="token",
+                iterable=list(token_counts.keys()),
+                keyvalues={},
+                retcols=["token", "pending"],
+            )
+            for token_row in token_rows:
+                token = token_row["token"]
+                new_pending = token_row["pending"] - token_counts[token]
+                self.db_pool.simple_update_one_txn(
+                    txn,
+                    table="registration_tokens",
+                    keyvalues={"token": token},
+                    updatevalues={"pending": new_pending},
+                )
 
         # Delete the corresponding completed credentials.
         self.db_pool.simple_delete_many_txn(
             txn,
             table="ui_auth_sessions_credentials",
             column="session_id",
-            iterable=session_ids,
+            values=session_ids,
             keyvalues={},
         )
 
@@ -334,7 +386,7 @@ class UIAuthWorkerStore(SQLBaseStore):
             txn,
             table="ui_auth_sessions",
             column="session_id",
-            iterable=session_ids,
+            values=session_ids,
             keyvalues={},
         )
 

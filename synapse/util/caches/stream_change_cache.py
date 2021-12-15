@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,11 +14,10 @@
 
 import logging
 import math
-from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Union
+from typing import Collection, Dict, FrozenSet, List, Mapping, Optional, Set, Union
 
 from sortedcontainers import SortedDict
 
-from synapse.types import Collection
 from synapse.util import caches
 
 logger = logging.getLogger(__name__)
@@ -42,15 +40,15 @@ class StreamChangeCache:
         self,
         name: str,
         current_stream_pos: int,
-        max_size=10000,
+        max_size: int = 10000,
         prefilled_cache: Optional[Mapping[EntityType, int]] = None,
-    ):
-        self._original_max_size = max_size
+    ) -> None:
+        self._original_max_size: int = max_size
         self._max_size = math.floor(max_size)
-        self._entity_to_key = {}  # type: Dict[EntityType, int]
+        self._entity_to_key: Dict[EntityType, int] = {}
 
         # map from stream id to the a set of entities which changed at that stream id.
-        self._cache = SortedDict()  # type: SortedDict[int, Set[EntityType]]
+        self._cache: SortedDict[int, Set[EntityType]] = SortedDict()
 
         # the earliest stream_pos for which we can reliably answer
         # get_all_entities_changed. In other words, one less than the earliest
@@ -84,8 +82,7 @@ class StreamChangeCache:
         return False
 
     def has_entity_changed(self, entity: EntityType, stream_pos: int) -> bool:
-        """Returns True if the entity may have been updated since stream_pos
-        """
+        """Returns True if the entity may have been updated since stream_pos"""
         assert isinstance(stream_pos, int)
 
         if stream_pos < self._earliest_known_stream_pos:
@@ -133,8 +130,7 @@ class StreamChangeCache:
         return result
 
     def has_any_entity_changed(self, stream_pos: int) -> bool:
-        """Returns if any entity has changed
-        """
+        """Returns if any entity has changed"""
         assert type(stream_pos) is int
 
         if not self._cache:
@@ -159,7 +155,7 @@ class StreamChangeCache:
         if stream_pos < self._earliest_known_stream_pos:
             return None
 
-        changed_entities = []  # type: List[EntityType]
+        changed_entities: List[EntityType] = []
 
         for k in self._cache.islice(start=self._cache.bisect_right(stream_pos)):
             changed_entities.extend(self._cache[k])
@@ -199,7 +195,7 @@ class StreamChangeCache:
             for entity in r:
                 del self._entity_to_key[entity]
 
-    def _evict(self):
+    def _evict(self) -> None:
         while len(self._cache) > self._max_size:
             k, r = self._cache.popitem(0)
             self._earliest_known_stream_pos = max(k, self._earliest_known_stream_pos)

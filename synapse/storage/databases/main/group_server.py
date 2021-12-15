@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017 Vector Creations Ltd
 # Copyright 2018 New Vector Ltd
 #
@@ -14,12 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+from typing_extensions import TypedDict
 
 from synapse.api.errors import SynapseError
 from synapse.storage._base import SQLBaseStore, db_to_json
+from synapse.storage.database import DatabasePool
+from synapse.storage.types import Connection
 from synapse.types import JsonDict
 from synapse.util import json_encoder
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 # The category ID for the "default" category. We don't store as null in the
 # database to avoid the fun of null != null
@@ -27,7 +33,23 @@ _DEFAULT_CATEGORY_ID = ""
 _DEFAULT_ROLE_ID = ""
 
 
+# A room in a group.
+class _RoomInGroup(TypedDict):
+    room_id: str
+    is_public: bool
+
+
 class GroupServerWorkerStore(SQLBaseStore):
+    def __init__(self, database: DatabasePool, db_conn: Connection, hs: "HomeServer"):
+        database.updates.register_background_index_update(
+            update_name="local_group_updates_index",
+            index_name="local_group_updates_stream_id_index",
+            table="local_group_updates",
+            columns=("stream_id",),
+            unique=True,
+        )
+        super().__init__(database, db_conn, hs)
+
     async def get_group(self, group_id: str) -> Optional[Dict[str, Any]]:
         return await self.db_pool.simple_select_one(
             table="groups",
@@ -72,7 +94,7 @@ class GroupServerWorkerStore(SQLBaseStore):
 
     async def get_rooms_in_group(
         self, group_id: str, include_private: bool = False
-    ) -> List[Dict[str, Union[str, bool]]]:
+    ) -> List[_RoomInGroup]:
         """Retrieve the rooms that belong to a given group. Does not return rooms that
         lack members.
 
@@ -88,6 +110,7 @@ class GroupServerWorkerStore(SQLBaseStore):
               "is_public": False                    # Whether this is a public room or not
             }
         """
+
         # TODO: Pagination
 
         def _get_rooms_in_group_txn(txn):
@@ -123,7 +146,9 @@ class GroupServerWorkerStore(SQLBaseStore):
         )
 
     async def get_rooms_for_summary_by_category(
-        self, group_id: str, include_private: bool = False,
+        self,
+        group_id: str,
+        include_private: bool = False,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Get the rooms and categories that should be included in a summary request
 
@@ -368,8 +393,7 @@ class GroupServerWorkerStore(SQLBaseStore):
     async def is_user_invited_to_local_group(
         self, group_id: str, user_id: str
     ) -> Optional[bool]:
-        """Has the group server invited a user?
-        """
+        """Has the group server invited a user?"""
         return await self.db_pool.simple_select_one_onecol(
             table="group_invites",
             keyvalues={"group_id": group_id, "user_id": user_id},
@@ -427,8 +451,7 @@ class GroupServerWorkerStore(SQLBaseStore):
         )
 
     async def get_publicised_groups_for_user(self, user_id: str) -> List[str]:
-        """Get all groups a user is publicising
-        """
+        """Get all groups a user is publicising"""
         return await self.db_pool.simple_select_onecol(
             table="local_group_membership",
             keyvalues={"user_id": user_id, "membership": "join", "is_publicised": True},
@@ -437,8 +460,7 @@ class GroupServerWorkerStore(SQLBaseStore):
         )
 
     async def get_attestations_need_renewals(self, valid_until_ms):
-        """Get all attestations that need to be renewed until givent time
-        """
+        """Get all attestations that need to be renewed until givent time"""
 
         def _get_attestations_need_renewals_txn(txn):
             sql = """
@@ -781,8 +803,7 @@ class GroupServerStore(GroupServerWorkerStore):
         profile: Optional[JsonDict],
         is_public: Optional[bool],
     ) -> None:
-        """Add/update room category for group
-        """
+        """Add/update room category for group"""
         insertion_values = {}
         update_values = {"category_id": category_id}  # This cannot be empty
 
@@ -818,8 +839,7 @@ class GroupServerStore(GroupServerWorkerStore):
         profile: Optional[JsonDict],
         is_public: Optional[bool],
     ) -> None:
-        """Add/remove user role
-        """
+        """Add/remove user role"""
         insertion_values = {}
         update_values = {"role_id": role_id}  # This cannot be empty
 
@@ -1012,8 +1032,7 @@ class GroupServerStore(GroupServerWorkerStore):
         )
 
     async def add_group_invite(self, group_id: str, user_id: str) -> None:
-        """Record that the group server has invited a user
-        """
+        """Record that the group server has invited a user"""
         await self.db_pool.simple_insert(
             table="group_invites",
             values={"group_id": group_id, "user_id": user_id},
@@ -1026,8 +1045,8 @@ class GroupServerStore(GroupServerWorkerStore):
         user_id: str,
         is_admin: bool = False,
         is_public: bool = True,
-        local_attestation: dict = None,
-        remote_attestation: dict = None,
+        local_attestation: Optional[dict] = None,
+        remote_attestation: Optional[dict] = None,
     ) -> None:
         """Add a user to the group server.
 
@@ -1156,8 +1175,7 @@ class GroupServerStore(GroupServerWorkerStore):
     async def update_group_publicity(
         self, group_id: str, user_id: str, publicise: bool
     ) -> None:
-        """Update whether the user is publicising their membership of the group
-        """
+        """Update whether the user is publicising their membership of the group"""
         await self.db_pool.simple_update_one(
             table="local_group_membership",
             keyvalues={"group_id": group_id, "user_id": user_id},
@@ -1171,7 +1189,7 @@ class GroupServerStore(GroupServerWorkerStore):
         user_id: str,
         membership: str,
         is_admin: bool = False,
-        content: JsonDict = {},
+        content: Optional[JsonDict] = None,
         local_attestation: Optional[dict] = None,
         remote_attestation: Optional[dict] = None,
         is_publicised: bool = False,
@@ -1191,6 +1209,8 @@ class GroupServerStore(GroupServerWorkerStore):
                 attestation from the group, else None.
             is_publicised: Whether this should be publicised.
         """
+
+        content = content or {}
 
         def _register_user_group_membership_txn(txn, next_id):
             # TODO: Upsert?
@@ -1300,8 +1320,7 @@ class GroupServerStore(GroupServerWorkerStore):
     async def update_attestation_renewal(
         self, group_id: str, user_id: str, attestation: dict
     ) -> None:
-        """Update an attestation that we have renewed
-        """
+        """Update an attestation that we have renewed"""
         await self.db_pool.simple_update_one(
             table="group_attestations_renewals",
             keyvalues={"group_id": group_id, "user_id": user_id},
@@ -1312,8 +1331,7 @@ class GroupServerStore(GroupServerWorkerStore):
     async def update_remote_attestion(
         self, group_id: str, user_id: str, attestation: dict
     ) -> None:
-        """Update an attestation that a remote has renewed
-        """
+        """Update an attestation that a remote has renewed"""
         await self.db_pool.simple_update_one(
             table="group_attestations_remote",
             keyvalues={"group_id": group_id, "user_id": user_id},

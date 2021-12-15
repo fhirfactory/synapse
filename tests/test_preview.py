@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +13,9 @@
 # limitations under the License.
 
 from synapse.rest.media.v1.preview_url_resource import (
-    decode_and_calc_og,
+    _calc_og,
+    decode_body,
+    get_html_media_encodings,
     summarize_paragraphs,
 )
 
@@ -26,7 +27,7 @@ except ImportError:
     lxml = None
 
 
-class PreviewTestCase(unittest.TestCase):
+class SummarizeTestCase(unittest.TestCase):
     if not lxml:
         skip = "url preview feature requires lxml"
 
@@ -144,12 +145,12 @@ class PreviewTestCase(unittest.TestCase):
         )
 
 
-class PreviewUrlTestCase(unittest.TestCase):
+class CalcOgTestCase(unittest.TestCase):
     if not lxml:
         skip = "url preview feature requires lxml"
 
     def test_simple(self):
-        html = """
+        html = b"""
         <html>
         <head><title>Foo</title></head>
         <body>
@@ -158,12 +159,13 @@ class PreviewUrlTestCase(unittest.TestCase):
         </html>
         """
 
-        og = decode_and_calc_og(html, "http://example.com/test.html")
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
 
         self.assertEqual(og, {"og:title": "Foo", "og:description": "Some text."})
 
     def test_comment(self):
-        html = """
+        html = b"""
         <html>
         <head><title>Foo</title></head>
         <body>
@@ -173,12 +175,13 @@ class PreviewUrlTestCase(unittest.TestCase):
         </html>
         """
 
-        og = decode_and_calc_og(html, "http://example.com/test.html")
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
 
         self.assertEqual(og, {"og:title": "Foo", "og:description": "Some text."})
 
     def test_comment2(self):
-        html = """
+        html = b"""
         <html>
         <head><title>Foo</title></head>
         <body>
@@ -191,7 +194,8 @@ class PreviewUrlTestCase(unittest.TestCase):
         </html>
         """
 
-        og = decode_and_calc_og(html, "http://example.com/test.html")
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
 
         self.assertEqual(
             og,
@@ -202,7 +206,7 @@ class PreviewUrlTestCase(unittest.TestCase):
         )
 
     def test_script(self):
-        html = """
+        html = b"""
         <html>
         <head><title>Foo</title></head>
         <body>
@@ -212,12 +216,13 @@ class PreviewUrlTestCase(unittest.TestCase):
         </html>
         """
 
-        og = decode_and_calc_og(html, "http://example.com/test.html")
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
 
         self.assertEqual(og, {"og:title": "Foo", "og:description": "Some text."})
 
     def test_missing_title(self):
-        html = """
+        html = b"""
         <html>
         <body>
         Some text.
@@ -225,12 +230,13 @@ class PreviewUrlTestCase(unittest.TestCase):
         </html>
         """
 
-        og = decode_and_calc_og(html, "http://example.com/test.html")
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
 
         self.assertEqual(og, {"og:title": None, "og:description": "Some text."})
 
     def test_h1_as_title(self):
-        html = """
+        html = b"""
         <html>
         <meta property="og:description" content="Some text."/>
         <body>
@@ -239,12 +245,13 @@ class PreviewUrlTestCase(unittest.TestCase):
         </html>
         """
 
-        og = decode_and_calc_og(html, "http://example.com/test.html")
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
 
         self.assertEqual(og, {"og:title": "Title", "og:description": "Some text."})
 
     def test_missing_title_and_broken_h1(self):
-        html = """
+        html = b"""
         <html>
         <body>
         <h1><a href="foo"/></h1>
@@ -253,11 +260,190 @@ class PreviewUrlTestCase(unittest.TestCase):
         </html>
         """
 
-        og = decode_and_calc_og(html, "http://example.com/test.html")
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
 
         self.assertEqual(og, {"og:title": None, "og:description": "Some text."})
 
     def test_empty(self):
-        html = ""
-        og = decode_and_calc_og(html, "http://example.com/test.html")
-        self.assertEqual(og, {})
+        """Test a body with no data in it."""
+        html = b""
+        tree = decode_body(html, "http://example.com/test.html")
+        self.assertIsNone(tree)
+
+    def test_no_tree(self):
+        """A valid body with no tree in it."""
+        html = b"\x00"
+        tree = decode_body(html, "http://example.com/test.html")
+        self.assertIsNone(tree)
+
+    def test_xml(self):
+        """Test decoding XML and ensure it works properly."""
+        # Note that the strip() call is important to ensure the xml tag starts
+        # at the initial byte.
+        html = b"""
+        <?xml version="1.0" encoding="UTF-8"?>
+
+        <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+        <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+        <head><title>Foo</title></head><body>Some text.</body></html>
+        """.strip()
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
+        self.assertEqual(og, {"og:title": "Foo", "og:description": "Some text."})
+
+    def test_invalid_encoding(self):
+        """An invalid character encoding should be ignored and treated as UTF-8, if possible."""
+        html = b"""
+        <html>
+        <head><title>Foo</title></head>
+        <body>
+        Some text.
+        </body>
+        </html>
+        """
+        tree = decode_body(html, "http://example.com/test.html", "invalid-encoding")
+        og = _calc_og(tree, "http://example.com/test.html")
+        self.assertEqual(og, {"og:title": "Foo", "og:description": "Some text."})
+
+    def test_invalid_encoding2(self):
+        """A body which doesn't match the sent character encoding."""
+        # Note that this contains an invalid UTF-8 sequence in the title.
+        html = b"""
+        <html>
+        <head><title>\xff\xff Foo</title></head>
+        <body>
+        Some text.
+        </body>
+        </html>
+        """
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
+        self.assertEqual(og, {"og:title": "ÿÿ Foo", "og:description": "Some text."})
+
+    def test_windows_1252(self):
+        """A body which uses cp1252, but doesn't declare that."""
+        html = b"""
+        <html>
+        <head><title>\xf3</title></head>
+        <body>
+        Some text.
+        </body>
+        </html>
+        """
+        tree = decode_body(html, "http://example.com/test.html")
+        og = _calc_og(tree, "http://example.com/test.html")
+        self.assertEqual(og, {"og:title": "ó", "og:description": "Some text."})
+
+
+class MediaEncodingTestCase(unittest.TestCase):
+    def test_meta_charset(self):
+        """A character encoding is found via the meta tag."""
+        encodings = get_html_media_encodings(
+            b"""
+        <html>
+        <head><meta charset="ascii">
+        </head>
+        </html>
+        """,
+            "text/html",
+        )
+        self.assertEqual(list(encodings), ["ascii", "utf-8", "cp1252"])
+
+        # A less well-formed version.
+        encodings = get_html_media_encodings(
+            b"""
+        <html>
+        <head>< meta charset = ascii>
+        </head>
+        </html>
+        """,
+            "text/html",
+        )
+        self.assertEqual(list(encodings), ["ascii", "utf-8", "cp1252"])
+
+    def test_meta_charset_underscores(self):
+        """A character encoding contains underscore."""
+        encodings = get_html_media_encodings(
+            b"""
+        <html>
+        <head><meta charset="Shift_JIS">
+        </head>
+        </html>
+        """,
+            "text/html",
+        )
+        self.assertEqual(list(encodings), ["shift_jis", "utf-8", "cp1252"])
+
+    def test_xml_encoding(self):
+        """A character encoding is found via the meta tag."""
+        encodings = get_html_media_encodings(
+            b"""
+        <?xml version="1.0" encoding="ascii"?>
+        <html>
+        </html>
+        """,
+            "text/html",
+        )
+        self.assertEqual(list(encodings), ["ascii", "utf-8", "cp1252"])
+
+    def test_meta_xml_encoding(self):
+        """Meta tags take precedence over XML encoding."""
+        encodings = get_html_media_encodings(
+            b"""
+        <?xml version="1.0" encoding="ascii"?>
+        <html>
+        <head><meta charset="UTF-16">
+        </head>
+        </html>
+        """,
+            "text/html",
+        )
+        self.assertEqual(list(encodings), ["utf-16", "ascii", "utf-8", "cp1252"])
+
+    def test_content_type(self):
+        """A character encoding is found via the Content-Type header."""
+        # Test a few variations of the header.
+        headers = (
+            'text/html; charset="ascii";',
+            "text/html;charset=ascii;",
+            'text/html;  charset="ascii"',
+            "text/html; charset=ascii",
+            'text/html; charset="ascii;',
+            'text/html; charset=ascii";',
+        )
+        for header in headers:
+            encodings = get_html_media_encodings(b"", header)
+            self.assertEqual(list(encodings), ["ascii", "utf-8", "cp1252"])
+
+    def test_fallback(self):
+        """A character encoding cannot be found in the body or header."""
+        encodings = get_html_media_encodings(b"", "text/html")
+        self.assertEqual(list(encodings), ["utf-8", "cp1252"])
+
+    def test_duplicates(self):
+        """Ensure each encoding is only attempted once."""
+        encodings = get_html_media_encodings(
+            b"""
+        <?xml version="1.0" encoding="utf8"?>
+        <html>
+        <head><meta charset="UTF-8">
+        </head>
+        </html>
+        """,
+            'text/html; charset="UTF_8"',
+        )
+        self.assertEqual(list(encodings), ["utf-8", "cp1252"])
+
+    def test_unknown_invalid(self):
+        """A character encoding should be ignored if it is unknown or invalid."""
+        encodings = get_html_media_encodings(
+            b"""
+        <html>
+        <head><meta charset="invalid">
+        </head>
+        </html>
+        """,
+            'text/html; charset="invalid"',
+        )
+        self.assertEqual(list(encodings), ["utf-8", "cp1252"])

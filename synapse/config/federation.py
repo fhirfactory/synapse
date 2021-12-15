@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +22,7 @@ class FederationConfig(Config):
 
     def read_config(self, config, **kwargs):
         # FIXME: federation_domain_whitelist needs sytests
-        self.federation_domain_whitelist = None  # type: Optional[dict]
+        self.federation_domain_whitelist: Optional[dict] = None
         federation_domain_whitelist = config.get("federation_domain_whitelist", None)
 
         if federation_domain_whitelist is not None:
@@ -40,6 +39,14 @@ class FederationConfig(Config):
             ("federation_metrics_domains",),
         )
         self.federation_metrics_domains = set(federation_metrics_domains)
+
+        self.allow_profile_lookup_over_federation = config.get(
+            "allow_profile_lookup_over_federation", True
+        )
+
+        self.allow_device_name_lookup_over_federation = config.get(
+            "allow_device_name_lookup_over_federation", True
+        )
 
     def generate_config_section(self, config_dir_path, server_name, **kwargs):
         return """\
@@ -66,6 +73,18 @@ class FederationConfig(Config):
         #federation_metrics_domains:
         #  - matrix.org
         #  - example.com
+
+        # Uncomment to disable profile lookup over federation. By default, the
+        # Federation API allows other homeservers to obtain profile data of any user
+        # on this homeserver. Defaults to 'true'.
+        #
+        #allow_profile_lookup_over_federation: false
+
+        # Uncomment to disable device display name lookup over federation. By default, the
+        # Federation API allows other homeservers to obtain device display names of any user
+        # on this homeserver. Defaults to 'true'.
+        #
+        #allow_device_name_lookup_over_federation: false
         """
 
 

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict
+from typing import Dict, Optional
+
+import attr
 
 from ._base import Config
 
@@ -21,24 +23,21 @@ class RateLimitConfig:
     def __init__(
         self,
         config: Dict[str, float],
-        defaults={"per_second": 0.17, "burst_count": 3.0},
+        defaults: Optional[Dict[str, float]] = None,
     ):
+        defaults = defaults or {"per_second": 0.17, "burst_count": 3.0}
+
         self.per_second = config.get("per_second", defaults["per_second"])
-        self.burst_count = config.get("burst_count", defaults["burst_count"])
+        self.burst_count = int(config.get("burst_count", defaults["burst_count"]))
 
 
+@attr.s(auto_attribs=True)
 class FederationRateLimitConfig:
-    _items_and_default = {
-        "window_size": 1000,
-        "sleep_limit": 10,
-        "sleep_delay": 500,
-        "reject_limit": 50,
-        "concurrent": 3,
-    }
-
-    def __init__(self, **kwargs):
-        for i in self._items_and_default.keys():
-            setattr(self, i, kwargs.get(i) or self._items_and_default[i])
+    window_size: int = 1000
+    sleep_limit: int = 10
+    sleep_delay: int = 500
+    reject_limit: int = 50
+    concurrent: int = 3
 
 
 class RatelimitConfig(Config):
@@ -67,15 +66,24 @@ class RatelimitConfig(Config):
         else:
             self.rc_federation = FederationRateLimitConfig(
                 **{
-                    "window_size": config.get("federation_rc_window_size"),
-                    "sleep_limit": config.get("federation_rc_sleep_limit"),
-                    "sleep_delay": config.get("federation_rc_sleep_delay"),
-                    "reject_limit": config.get("federation_rc_reject_limit"),
-                    "concurrent": config.get("federation_rc_concurrent"),
+                    k: v
+                    for k, v in {
+                        "window_size": config.get("federation_rc_window_size"),
+                        "sleep_limit": config.get("federation_rc_sleep_limit"),
+                        "sleep_delay": config.get("federation_rc_sleep_delay"),
+                        "reject_limit": config.get("federation_rc_reject_limit"),
+                        "concurrent": config.get("federation_rc_concurrent"),
+                    }.items()
+                    if v is not None
                 }
             )
 
         self.rc_registration = RateLimitConfig(config.get("rc_registration", {}))
+
+        self.rc_registration_token_validity = RateLimitConfig(
+            config.get("rc_registration_token_validity", {}),
+            defaults={"per_second": 0.1, "burst_count": 5},
+        )
 
         rc_login_config = config.get("rc_login", {})
         self.rc_login_address = RateLimitConfig(rc_login_config.get("address", {}))
@@ -95,11 +103,35 @@ class RatelimitConfig(Config):
 
         self.rc_joins_local = RateLimitConfig(
             config.get("rc_joins", {}).get("local", {}),
-            defaults={"per_second": 0.1, "burst_count": 3},
+            defaults={"per_second": 0.1, "burst_count": 10},
         )
         self.rc_joins_remote = RateLimitConfig(
             config.get("rc_joins", {}).get("remote", {}),
-            defaults={"per_second": 0.01, "burst_count": 3},
+            defaults={"per_second": 0.01, "burst_count": 10},
+        )
+
+        # Ratelimit cross-user key requests:
+        # * For local requests this is keyed by the sending device.
+        # * For requests received over federation this is keyed by the origin.
+        #
+        # Note that this isn't exposed in the configuration as it is obscure.
+        self.rc_key_requests = RateLimitConfig(
+            config.get("rc_key_requests", {}),
+            defaults={"per_second": 20, "burst_count": 100},
+        )
+
+        self.rc_3pid_validation = RateLimitConfig(
+            config.get("rc_3pid_validation") or {},
+            defaults={"per_second": 0.003, "burst_count": 5},
+        )
+
+        self.rc_invites_per_room = RateLimitConfig(
+            config.get("rc_invites", {}).get("per_room", {}),
+            defaults={"per_second": 0.3, "burst_count": 10},
+        )
+        self.rc_invites_per_user = RateLimitConfig(
+            config.get("rc_invites", {}).get("per_user", {}),
+            defaults={"per_second": 0.003, "burst_count": 5},
         )
 
     def generate_config_section(self, **kwargs):
@@ -117,6 +149,8 @@ class RatelimitConfig(Config):
         #     is using
         #   - one for registration that ratelimits registration requests based on the
         #     client's IP address.
+        #   - one for checking the validity of registration tokens that ratelimits
+        #     requests based on the client's IP address.
         #   - one for login that ratelimits login requests based on the client's IP
         #     address.
         #   - one for login that ratelimits login requests based on the account the
@@ -131,6 +165,9 @@ class RatelimitConfig(Config):
         #     users are joining rooms the server is already in (this is cheap) vs
         #     "remote" for when users are trying to join rooms not on the server (which
         #     can be more expensive)
+        #   - one for ratelimiting how often a user or IP can attempt to validate a 3PID.
+        #   - two for ratelimiting how often invites can be sent in a room or to a
+        #     specific user.
         #
         # The defaults are as shown below.
         #
@@ -141,6 +178,10 @@ class RatelimitConfig(Config):
         #rc_registration:
         #  per_second: 0.17
         #  burst_count: 3
+        #
+        #rc_registration_token_validity:
+        #  per_second: 0.1
+        #  burst_count: 5
         #
         #rc_login:
         #  address:
@@ -160,11 +201,22 @@ class RatelimitConfig(Config):
         #rc_joins:
         #  local:
         #    per_second: 0.1
-        #    burst_count: 3
+        #    burst_count: 10
         #  remote:
         #    per_second: 0.01
-        #    burst_count: 3
-
+        #    burst_count: 10
+        #
+        #rc_3pid_validation:
+        #  per_second: 0.003
+        #  burst_count: 5
+        #
+        #rc_invites:
+        #  per_room:
+        #    per_second: 0.3
+        #    burst_count: 10
+        #  per_user:
+        #    per_second: 0.003
+        #    burst_count: 5
 
         # Ratelimiting settings for incoming federation
         #
