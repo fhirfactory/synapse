@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-import os
 import re
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -127,7 +126,6 @@ class ProxyAgent(_AgentBase):
 
         self._policy_for_https = contextFactory
         self._reactor = reactor
-        self._no_proxy = _bytes_to_string(no_proxy)
 
     def request(
         self,
@@ -242,55 +240,6 @@ class ProxyAgent(_AgentBase):
             pool_key, endpoint, method, parsed_uri, headers, bodyProducer, request_path
         )
 
-def _bytes_to_string(bytes_value):
-    if bytes_value is None:
-        return None
-    else:
-        return bytes_value.decode()
-
-
-def _should_bypass_proxies(hostname, port, no_proxy):
-    """
-    Returns whether we should bypass proxies or not.
-    Based on https://github.com/psf/requests/blob/master/requests/utils.py
-    NOTE: for simplicity IP addresses and CIDR ranges aren't supported in the no_proxy value, but could be copied in from the above URL if required
-    :rtype: bool
-    """
-    # Prioritize lowercase environment variables over uppercase
-    # to keep a consistent behaviour with other http projects (curl, wget).
-    get_env = lambda k: os.environ.get(k) or os.environ.get(k.upper())
-
-    # First check whether no_proxy is defined. If it is, check that the URL
-    # we're getting isn't in the no_proxy list.
-    if no_proxy is None:
-        # TODO Would normally not do this, but instead just let the client specify, to allow for client controlled behaviour.
-        # As we are currently copying over the synapse files when building the docker image, this saved on having to maintain the merging
-        # of three other files in the synapse source.  So this code still allows the client to specify the no_proxy in the constructor of this
-        # class, but if that value is not specified, then this code will look up the no_proxy value from the environment variables.        
-        no_proxy = get_env('no_proxy')
-    
-    # First check whether no_proxy is defined. If it is, check that the URL
-    # we're getting isn't in the no_proxy list.
-    if hostname is None:
-        # URLs don't always have hostnames, e.g. file:/// urls.
-        return True
-
-    if no_proxy:
-        # We need to check whether we match here. We need to see if we match
-        # the end of the hostname, both with and without the port.
-        no_proxy_array = (
-            host for host in no_proxy.replace(' ', '').split(',') if host
-        )
-
-        host_with_port = hostname
-        if port:
-            host_with_port += ':{}'.format(port)
-
-        for host in no_proxy_array:
-            if hostname.endswith(host) or host_with_port.endswith(host):
-                # The URL does match something in no_proxy, so we don't want
-                # to apply the proxies on this URL.
-                return True
 
 def http_proxy_endpoint(
     proxy: Optional[bytes],

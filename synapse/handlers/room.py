@@ -130,7 +130,7 @@ class RoomCreationHandler:
 
         # Modify presets to selectively enable encryption by default per homeserver config
         for preset_name, preset_config in self._presets_dict.items():
-            encrypted = self.config.encryption_enabled and (
+            encrypted = self.config.server.encryption_enabled and (
                 preset_name
                 in self.config.room.encryption_enabled_by_default_for_room_presets
             )
@@ -994,7 +994,7 @@ class RoomCreationHandler:
 
         room_encryption_power_level = 100
 
-        if (not self.config.encryption_enabled):
+        if (not self.config.server.encryption_enabled):
             # Disable room encryption by setting the required power level to be an impossible value 
             # Based on https://github.com/matrix-org/synapse/issues/4367#issuecomment-452772632
             room_encryption_power_level = 101
@@ -1049,7 +1049,7 @@ class RoomCreationHandler:
                 etype=EventTypes.PowerLevels, content=power_level_content
             )
 
-            if (not self.config.encryption_enabled):
+            if (not self.config.server.encryption_enabled):
                 logger.debug(
                     "power_level_content['events'][EventTypes.RoomEncryption]=%s for room_id=%s created by %s",
                     power_level_content["events"][EventTypes.RoomEncryption],
