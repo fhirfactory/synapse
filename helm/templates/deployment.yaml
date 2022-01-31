@@ -275,19 +275,19 @@ spec:
         livenessProbe:
           httpGet:
             path: /
-            port: 8448
-            scheme: HTTPS
+            port: 8008
+            scheme: HTTP
           initialDelaySeconds: 30
         name: synapse
         ports:
-        - containerPort: 8448
-          name: https
+        - containerPort: 8008
+          name: http
           protocol: TCP
         readinessProbe:
           httpGet:
             path: /
-            port: 8448
-            scheme: HTTPS
+            port: 8008
+            scheme: HTTP
           initialDelaySeconds: 10
         securityContext:
           privileged: false
