@@ -305,7 +305,7 @@ spec:
       volumes:
       - name: data
         hostPath: 
-          path: {{ .Values.hostPath }}-tmp-data
+          path: {{ .Values.hostPathData | default (print .Values.hostPath "-tmp-data") }}
       - name: config
         hostPath: 
           path: {{ .Values.hostPath }}
