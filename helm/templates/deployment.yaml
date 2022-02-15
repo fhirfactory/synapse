@@ -48,8 +48,8 @@ spec:
         - name: SYNAPSE_DB_PASSWORD
           valueFrom:
            secretKeyRef:
-            name: {{ .Values.serviceName }}-secrets
-            key: dbPassword
+            name: aether-itops-replica-storage-secrets
+            key: keyPassword
         - name: AZURE_TENANT_ID
           valueFrom:
            secretKeyRef:
@@ -121,6 +121,7 @@ spec:
             [ -e /var/lib/synapse/config/homeserver-with-placeholders.yaml ] || cp /var/lib/synapse/config/homeserver.yaml /var/lib/synapse/config/homeserver-with-placeholders.yaml;
             /bin/cp -f /var/lib/synapse/config/homeserver-with-placeholders.yaml /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<MatrixServerName>/{{ .Values.matrixServerName }}/\" /var/lib/synapse/config/homeserver.yaml;
+            sed -i \"s/<db-host>/${MY_NODE_NAME}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<db-password>/${SYNAPSE_DB_PASSWORD}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<publicBaseHostNameAndPort>/{{ .Values.externalDnsEntry | default (print (.Values.dnsEntry | default (print .Values.serviceName "." .Release.Namespace ":" .Values.basePort) ) ) }}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<serviceName>/{{ .Values.externalDnsEntry | default (print .Values.serviceName ".site-a" ) }}/\" /var/lib/synapse/config/homeserver.yaml;            
