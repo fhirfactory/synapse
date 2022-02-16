@@ -5,6 +5,7 @@ FROM matrixdotorg/synapse:v1.49.0
 # that the synapse docker image doesn't already provide.
 COPY synapse/config/server.py /usr/local/lib/python3.8/site-packages/synapse/config/server.py
 COPY synapse/handlers/room.py /usr/local/lib/python3.8/site-packages/synapse/handlers/room.py
+COPY synapse/storage/databases/main/search.py /usr/local/lib/python3.8/site-packages/synapse/storage/databases/main/search.py
 
 # Install our root certificates
 COPY docker/ca-local.cer /usr/local/share/ca-certificates/ca-local.crt

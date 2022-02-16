@@ -721,7 +721,7 @@ def _parse_query(database_engine, search_term):
     """
 
     # Pull out the individual words, discarding any non-word characters.
-    results = re.findall(r"([\w\-]+)", search_term, re.UNICODE)
+    results = re.findall(r"([\w\-\.\^]+)", search_term, re.UNICODE)
 
     if isinstance(database_engine, PostgresEngine):
         return " & ".join(result + ":*" for result in results)
