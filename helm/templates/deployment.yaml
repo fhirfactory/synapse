@@ -27,16 +27,16 @@ spec:
       imagePullSecrets:
         - name: {{ .Values.acrSecretName }}
       {{- end }}
-#      affinity:
-#        nodeAffinity:
-#          preferredDuringSchedulingIgnoredDuringExecution:
-#          - weight: 1
-#            preference:
-#              matchExpressions:
-#              - key: computeResources
-#                operator: In
-#                values:
-#                - High
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: computeResources
+                operator: In
+                values:
+                - High
     {{- if (.Values.pushGwyHostName) }} 
       hostAliases:
         - ip: {{ .Values.pushGwySvcIP }}
@@ -45,6 +45,13 @@ spec:
     {{- end }}
       initContainers:
       - env:
+        - name: SYNAPSE_DB_HOST
+          value: {{ .Values.synapseDbHost }}
+        - name: SYNAPSE_DB_PASSWORD
+          valueFrom:
+           secretKeyRef:
+            name: aether-itops-replica-storage-secrets
+            key: keyPassword
         - name: AZURE_TENANT_ID
           valueFrom:
            secretKeyRef:
@@ -75,6 +82,37 @@ spec:
            secretKeyRef:
             name: {{ .Values.serviceName }}-secrets
             key: formSecret
+        {{- if (.Values.turnURLs) }} 
+        - name: TURN_SERVER_SHARED_SECRET
+          valueFrom:
+           secretKeyRef:
+            name: {{ .Values.serviceName }}-secrets
+            key: turnServerSharedSecret
+        {{- end }}
+        {{- if (.Values.fhirBridgeURL) }} 
+        - name: FHIRBRIDGE_AS_TOKEN
+          valueFrom:
+           secretKeyRef:
+            name: {{ .Values.serviceName }}-secrets
+            key: fhirBridgeASToken
+        - name: FHIRBRIDGE_HS_TOKEN
+          valueFrom:
+           secretKeyRef:
+            name: {{ .Values.serviceName }}-secrets
+            key: fhirBridgeHSToken
+        {{- end }}
+        {{- if (.Values.replicaBridgeURL) }} 
+        - name: REPLICABRIDGE_AS_TOKEN
+          valueFrom:
+           secretKeyRef:
+            name: {{ .Values.serviceName }}-secrets
+            key: replicaBridgeASToken
+        - name: REPLICABRIDGE_HS_TOKEN
+          valueFrom:
+           secretKeyRef:
+            name: {{ .Values.serviceName }}-secrets
+            key: replicaBridgeHSToken
+        {{- end }}
         name: init
         image: alpine:3.12.3
         imagePullPolicy: {{ .Values.imagePullPolicy | default "IfNotPresent" }}
@@ -85,10 +123,10 @@ spec:
             [ -e /var/lib/synapse/config/homeserver-with-placeholders.yaml ] || cp /var/lib/synapse/config/homeserver.yaml /var/lib/synapse/config/homeserver-with-placeholders.yaml;
             /bin/cp -f /var/lib/synapse/config/homeserver-with-placeholders.yaml /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<MatrixServerName>/{{ .Values.matrixServerName }}/\" /var/lib/synapse/config/homeserver.yaml;
-            sed -i \"s/<publicBaseHostNameAndPort>/{{ .Values.externalDnsEntry | default (print (.Values.dnsEntry | default (print .Values.serviceName "." .Release.Namespace) ) ":" .Values.basePort) }}/\" /var/lib/synapse/config/homeserver.yaml;
-        {{- if (.Values.externalDnsEntry) }} 
-            sed -i \"s/pegacorn-communicate-roomserver.site-a/{{ .Values.externalDnsEntry }}/\" /var/lib/synapse/config/homeserver.yaml;
-        {{- end }}
+            sed -i \"s/<db-host>/${SYNAPSE_DB_HOST}/\" /var/lib/synapse/config/homeserver.yaml;
+            sed -i \"s/<db-password>/${SYNAPSE_DB_PASSWORD}/\" /var/lib/synapse/config/homeserver.yaml;
+            sed -i \"s/<publicBaseHostNameAndPort>/{{ .Values.externalDnsEntry | default (print (.Values.dnsEntry | default (print .Values.serviceName "." .Release.Namespace ":" .Values.basePort) ) ) }}/\" /var/lib/synapse/config/homeserver.yaml;
+            sed -i \"s/<serviceName>/{{ .Values.externalDnsEntry | default (print .Values.serviceName ".site-a" ) }}/\" /var/lib/synapse/config/homeserver.yaml;            
             sed -i \"s/<tenant id>/${AZURE_TENANT_ID}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<client id>/${AZURE_CLIENT_ID}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<client secret>/${AZURE_CLIENT_SECRET}/\" /var/lib/synapse/config/homeserver.yaml;
@@ -98,7 +136,8 @@ spec:
             sed -i \"s/<AllowPasswordLogin>/{{ .Values.allowPasswordLogin | default "false" }}/\" /var/lib/synapse/config/homeserver.yaml;
         {{- if (.Values.turnURLs) }} 
             sed -i '/turn_uris:/ a turn_allow_guests: {{ .Values.turnAllowGuests | default "true" }} \\' /var/lib/synapse/config/homeserver.yaml;
-            sed -i '/turn_uris:/ a turn_shared_secret: \"{{ .Values.turnSharedSecret }}\" \\' /var/lib/synapse/config/homeserver.yaml;
+            sed -i '/turn_uris:/ a turn_shared_secret: \"<turnServerSharedSecret>\" \\' /var/lib/synapse/config/homeserver.yaml;
+            sed -i \"s/<turnServerSharedSecret>/${TURN_SERVER_SHARED_SECRET}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i '/turn_uris:/ a turn_user_lifetime: {{ .Values.turnUserLifetime | default "1h" }} \\' /var/lib/synapse/config/homeserver.yaml;
           {{- range (split "^" .Values.turnURLs) }}
             sed -i '/turn_uris:/ a\\  - \"{{ . }}\" ' /var/lib/synapse/config/homeserver.yaml;            
@@ -116,11 +155,46 @@ spec:
             sed -i \"/#ip_range_whitelist:/ a\\  - '{{ .Values.pushGwySvcIP }}' \" /var/lib/synapse/config/homeserver.yaml;
             sed -i '/#ip_range_whitelist:/ a\\ip_range_whitelist: ' /var/lib/synapse/config/homeserver.yaml;
         {{- end }}
+        {{- if (.Values.fhirBridgeURL) }} 
+            sed -i '/#app_service_config_files:/ a\\  - /var/lib/synapse/config/communicate-fhirbridge-link.yaml ' /var/lib/synapse/config/homeserver.yaml;
+        {{- end }}
+        {{- if (.Values.replicaBridgeURL) }} 
+            sed -i '/#app_service_config_files:/ a\\  - /var/lib/synapse/config/replica-bridge-registration.yaml ' /var/lib/synapse/config/homeserver.yaml;
+        {{- end }}
+        {{- if or (.Values.fhirBridgeURL) (.Values.replicaBridgeURL) }} 
+            sed -i '/#app_service_config_files:/ a\\app_service_config_files: ' /var/lib/synapse/config/homeserver.yaml;
+        {{- end }}
             echo START of /var/lib/synapse/config/homeserver.yaml file content;
             echo ' ';
             cat /var/lib/synapse/config/homeserver.yaml;
             echo ' ';
             echo END of /var/lib/synapse/config/homeserver.yaml file content;
+        {{- if (.Values.fhirBridgeURL) }} 
+            echo Updating /var/lib/synapse/config/communicate-fhirbridge-link.yaml file; 
+            [ -e /var/lib/synapse/config/communicate-fhirbridge-link-with-placeholders.yaml ] || cp /var/lib/synapse/config/communicate-fhirbridge-link.yaml /var/lib/synapse/config/communicate-fhirbridge-link-with-placeholders.yaml;
+            /bin/cp -f /var/lib/synapse/config/communicate-fhirbridge-link-with-placeholders.yaml /var/lib/synapse/config/communicate-fhirbridge-link.yaml;
+            sed -i \"s+<url>+{{ .Values.fhirBridgeURL }}+\" /var/lib/synapse/config/communicate-fhirbridge-link.yaml;
+            sed -i \"s/<as_token>/${FHIRBRIDGE_AS_TOKEN}/\" /var/lib/synapse/config/communicate-fhirbridge-link.yaml;
+            sed -i \"s/<hs_token>/${FHIRBRIDGE_HS_TOKEN}/\" /var/lib/synapse/config/communicate-fhirbridge-link.yaml;
+            echo START of /var/lib/synapse/config/communicate-fhirbridge-link.yaml file content;
+            echo ' ';
+            cat /var/lib/synapse/config/communicate-fhirbridge-link.yaml;
+            echo ' ';
+            echo END of /var/lib/synapse/config/communicate-fhirbridge-link.yaml file content;
+        {{- end }}
+        {{- if (.Values.replicaBridgeURL) }} 
+            echo Updating /var/lib/synapse/config/replica-bridge-registration.yaml file; 
+            [ -e /var/lib/synapse/config/replica-bridge-registration-with-placeholders.yaml ] || cp /var/lib/synapse/config/replica-bridge-registration.yaml /var/lib/synapse/config/replica-bridge-registration-with-placeholders.yaml;
+            /bin/cp -f /var/lib/synapse/config/replica-bridge-registration-with-placeholders.yaml /var/lib/synapse/config/replica-bridge-registration.yaml;
+            sed -i \"s+<url>+{{ .Values.replicaBridgeURL }}+\" /var/lib/synapse/config/replica-bridge-registration.yaml;
+            sed -i \"s/<as_token>/${REPLICABRIDGE_AS_TOKEN}/\" /var/lib/synapse/config/replica-bridge-registration.yaml;
+            sed -i \"s/<hs_token>/${REPLICABRIDGE_HS_TOKEN}/\" /var/lib/synapse/config/replica-bridge-registration.yaml;
+            echo START of /var/lib/synapse/config/replica-bridge-registration.yaml file content;
+            echo ' ';
+            cat /var/lib/synapse/config/replica-bridge-registration.yaml;
+            echo ' ';
+            echo END of /var/lib/synapse/config/replica-bridge-registration.yaml file content;
+        {{- end }}
             echo Updating /var/lib/synapse/config/log.config file; 
             [ -e /var/lib/synapse/config/log-with-placeholders.config ] || cp /var/lib/synapse/config/log.config /var/lib/synapse/config/log-with-placeholders.config;
             /bin/cp -f /var/lib/synapse/config/log-with-placeholders.config /var/lib/synapse/config/log.config;
@@ -218,6 +292,9 @@ spec:
         - containerPort: 8448
           name: https
           protocol: TCP
+        - containerPort: 8008
+          name: http
+          protocol: TCP
         readinessProbe:
           httpGet:
             path: /
@@ -237,7 +314,7 @@ spec:
       volumes:
       - name: data
         hostPath: 
-          path: {{ .Values.hostPath }}-tmp-data
+          path: {{ .Values.hostPathData | default (print .Values.hostPath "-tmp-data") }}
       - name: config
         hostPath: 
           path: {{ .Values.hostPath }}
