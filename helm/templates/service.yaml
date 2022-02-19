@@ -23,11 +23,11 @@ spec:
     protocol: TCP
     targetPort: 8448
     nodePort: {{ if (.Values.serviceType) and (eq .Values.serviceType "NodePort")}} {{ add 0 .Values.basePort }} {{ end }}
-#  - name: tmphttp
-#    port: {{ .Values.httpPort }}
-#    protocol: TCP
-#    targetPort: 8008
-#    nodePort: {{ if (.Values.serviceType) and (eq .Values.serviceType "NodePort")}} {{ add 1 .Values.basePort }} {{ end }}
+  - name: tmphttp
+    port: {{ .Values.httpPort }}
+    protocol: TCP
+    targetPort: 8008
+    nodePort: {{ if (.Values.serviceType) and (eq .Values.serviceType "NodePort")}} {{ add 1 .Values.basePort }} {{ end }}
   selector:
     app: {{ .Values.serviceName }}
   type: {{ .Values.serviceType | default "LoadBalancer" }}
