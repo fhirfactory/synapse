@@ -1,4 +1,4 @@
-FROM matrixdotorg/synapse:v1.49.0
+FROM matrixdotorg/synapse:v1.57.1
 
 # Copy the pegacorn python source code over the synapse source code
 # This method only works if the changes made to the source code don't introduce new dependencies, 
@@ -16,3 +16,5 @@ RUN update-ca-certificates
 ARG IMAGE_BUILD_TIMESTAMP
 ENV IMAGE_BUILD_TIMESTAMP=${IMAGE_BUILD_TIMESTAMP}
 RUN echo IMAGE_BUILD_TIMESTAMP=${IMAGE_BUILD_TIMESTAMP}
+
+RUN apt remove curl libcurl4 -y

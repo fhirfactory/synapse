@@ -52,6 +52,8 @@ spec:
            secretKeyRef:
             name: aether-itops-replica-storage-secrets
             key: keyPassword
+        - name: SYNAPSE_DB_PORT
+          value: "{{ .Values.synapseDbPort }}"
         - name: AZURE_TENANT_ID
           valueFrom:
            secretKeyRef:
@@ -125,6 +127,7 @@ spec:
             sed -i \"s/<MatrixServerName>/{{ .Values.matrixServerName }}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<db-host>/${SYNAPSE_DB_HOST}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<db-password>/${SYNAPSE_DB_PASSWORD}/\" /var/lib/synapse/config/homeserver.yaml;
+            sed -i \"s/<db-port>/${SYNAPSE_DB_PORT}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<publicBaseHostNameAndPort>/{{ .Values.externalDnsEntry | default (print (.Values.dnsEntry | default (print .Values.serviceName "." .Release.Namespace ":" .Values.basePort) ) ) }}/\" /var/lib/synapse/config/homeserver.yaml;
             sed -i \"s/<serviceName>/{{ .Values.externalDnsEntry | default (print .Values.serviceName ".site-a" ) }}/\" /var/lib/synapse/config/homeserver.yaml;            
             sed -i \"s/<tenant id>/${AZURE_TENANT_ID}/\" /var/lib/synapse/config/homeserver.yaml;
