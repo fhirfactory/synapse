@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -70,6 +69,11 @@ class SequenceGenerator(metaclass=abc.ABCMeta):
         ...
 
     @abc.abstractmethod
+    def get_next_mult_txn(self, txn: Cursor, n: int) -> List[int]:
+        """Get the next `n` IDs in the sequence"""
+        ...
+
+    @abc.abstractmethod
     def check_consistency(
         self,
         db_conn: "LoggingDatabaseConnection",
@@ -77,7 +81,7 @@ class SequenceGenerator(metaclass=abc.ABCMeta):
         id_column: str,
         stream_name: Optional[str] = None,
         positive: bool = True,
-    ):
+    ) -> None:
         """Should be called during start up to test that the current value of
         the sequence is greater than or equal to the maximum ID in the table.
 
@@ -101,7 +105,9 @@ class PostgresSequenceGenerator(SequenceGenerator):
 
     def get_next_id_txn(self, txn: Cursor) -> int:
         txn.execute("SELECT nextval(?)", (self._sequence_name,))
-        return txn.fetchone()[0]
+        fetch_res = txn.fetchone()
+        assert fetch_res is not None
+        return fetch_res[0]
 
     def get_next_mult_txn(self, txn: Cursor, n: int) -> List[int]:
         txn.execute(
@@ -116,9 +122,8 @@ class PostgresSequenceGenerator(SequenceGenerator):
         id_column: str,
         stream_name: Optional[str] = None,
         positive: bool = True,
-    ):
-        """See SequenceGenerator.check_consistency for docstring.
-        """
+    ) -> None:
+        """See SequenceGenerator.check_consistency for docstring."""
 
         txn = db_conn.cursor(txn_name="sequence.check_consistency")
 
@@ -142,7 +147,9 @@ class PostgresSequenceGenerator(SequenceGenerator):
         txn.execute(
             "SELECT last_value, is_called FROM %(seq)s" % {"seq": self._sequence_name}
         )
-        last_value, is_called = txn.fetchone()
+        fetch_res = txn.fetchone()
+        assert fetch_res is not None
+        last_value, is_called = fetch_res
 
         # If we have an associated stream check the stream_positions table.
         max_in_stream_positions = None
@@ -201,10 +208,10 @@ class LocalSequenceGenerator(SequenceGenerator):
                  get_next_id_txn; should return the curreent maximum id
         """
         # the callback. this is cleared after it is called, so that it can be GCed.
-        self._callback = get_first_callback  # type: Optional[GetFirstCallbackType]
+        self._callback: Optional[GetFirstCallbackType] = get_first_callback
 
         # The current max value, or None if we haven't looked in the DB yet.
-        self._current_max_id = None  # type: Optional[int]
+        self._current_max_id: Optional[int] = None
         self._lock = threading.Lock()
 
     def get_next_id_txn(self, txn: Cursor) -> int:
@@ -219,6 +226,17 @@ class LocalSequenceGenerator(SequenceGenerator):
             self._current_max_id += 1
             return self._current_max_id
 
+    def get_next_mult_txn(self, txn: Cursor, n: int) -> List[int]:
+        with self._lock:
+            if self._current_max_id is None:
+                assert self._callback is not None
+                self._current_max_id = self._callback(txn)
+                self._callback = None
+
+            first_id = self._current_max_id + 1
+            self._current_max_id += n
+            return [first_id + i for i in range(n)]
+
     def check_consistency(
         self,
         db_conn: Connection,
@@ -226,15 +244,20 @@ class LocalSequenceGenerator(SequenceGenerator):
         id_column: str,
         stream_name: Optional[str] = None,
         positive: bool = True,
-    ):
+    ) -> None:
         # There is nothing to do for in memory sequences
         pass
 
 
 def build_sequence_generator(
+    db_conn: "LoggingDatabaseConnection",
     database_engine: BaseDatabaseEngine,
     get_first_callback: GetFirstCallbackType,
     sequence_name: str,
+    table: Optional[str],
+    id_column: Optional[str],
+    stream_name: Optional[str] = None,
+    positive: bool = True,
 ) -> SequenceGenerator:
     """Get the best impl of SequenceGenerator available
 
@@ -246,8 +269,23 @@ def build_sequence_generator(
         get_first_callback: a callback which gets the next sequence ID. Used if
             we're on sqlite.
         sequence_name: the name of a postgres sequence to use.
+        table, id_column, stream_name, positive: If set then `check_consistency`
+            is called on the created sequence. See docstring for
+            `check_consistency` details.
     """
     if isinstance(database_engine, PostgresEngine):
-        return PostgresSequenceGenerator(sequence_name)
+        seq: SequenceGenerator = PostgresSequenceGenerator(sequence_name)
     else:
-        return LocalSequenceGenerator(get_first_callback)
+        seq = LocalSequenceGenerator(get_first_callback)
+
+    if table:
+        assert id_column
+        seq.check_consistency(
+            db_conn=db_conn,
+            table=table,
+            id_column=id_column,
+            stream_name=stream_name,
+            positive=positive,
+        )
+
+    return seq

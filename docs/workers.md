@@ -16,7 +16,7 @@ workers only work with PostgreSQL-based Synapse deployments. SQLite should only
 be used for demo purposes and any admin considering workers should already be
 running PostgreSQL.
 
-See also https://matrix.org/blog/2020/11/03/how-we-fixed-synapses-scalability
+See also [Matrix.org blog post](https://matrix.org/blog/2020/11/03/how-we-fixed-synapses-scalability)
 for a higher level overview.
 
 ## Main process/worker communication
@@ -39,6 +39,9 @@ to the main process, all the workers and the main process connect to Redis,
 which relays replication commands between processes. This can give a significant
 cpu saving on the main process and will be a prerequisite for upcoming
 performance improvements.
+
+If Redis support is enabled Synapse will use it as a shared cache, as well as a
+pub/sub mechanism.
 
 See the [Architectural diagram](#architectural-diagram) section at the end for
 a visualisation of what this looks like.
@@ -70,7 +73,7 @@ https://hub.docker.com/r/matrixdotorg/synapse/.
 To make effective use of the workers, you will need to configure an HTTP
 reverse-proxy such as nginx or haproxy, which will direct incoming requests to
 the correct worker, or to the main synapse instance. See
-[reverse_proxy.md](reverse_proxy.md) for information on setting up a reverse
+[the reverse proxy documentation](reverse_proxy.md) for information on setting up a reverse
 proxy.
 
 When using workers, each worker process has its own configuration file which
@@ -167,8 +170,8 @@ Finally, you need to start your worker processes. This can be done with either
 `synctl` or your distribution's preferred service manager such as `systemd`. We
 recommend the use of `systemd` where available: for information on setting up
 `systemd` to start synapse workers, see
-[systemd-with-workers](systemd-with-workers). To use `synctl`, see
-[synctl_workers.md](synctl_workers.md).
+[Systemd with Workers](systemd-with-workers). To use `synctl`, see
+[Using synctl with Workers](synctl_workers.md).
 
 
 ## Available worker applications
@@ -179,10 +182,10 @@ This worker can handle API requests matching the following regular
 expressions:
 
     # Sync requests
-    ^/_matrix/client/(v2_alpha|r0)/sync$
-    ^/_matrix/client/(api/v1|v2_alpha|r0)/events$
-    ^/_matrix/client/(api/v1|r0)/initialSync$
-    ^/_matrix/client/(api/v1|r0)/rooms/[^/]+/initialSync$
+    ^/_matrix/client/(v2_alpha|r0|v3)/sync$
+    ^/_matrix/client/(api/v1|v2_alpha|r0|v3)/events$
+    ^/_matrix/client/(api/v1|r0|v3)/initialSync$
+    ^/_matrix/client/(api/v1|r0|v3)/rooms/[^/]+/initialSync$
 
     # Federation requests
     ^/_matrix/federation/v1/event/
@@ -206,39 +209,47 @@ expressions:
     ^/_matrix/federation/v1/user/devices/
     ^/_matrix/federation/v1/get_groups_publicised$
     ^/_matrix/key/v2/query
+    ^/_matrix/federation/unstable/org.matrix.msc2946/spaces/
+    ^/_matrix/federation/(v1|unstable/org.matrix.msc2946)/hierarchy/
 
     # Inbound federation transaction request
     ^/_matrix/federation/v1/send/
 
     # Client API requests
-    ^/_matrix/client/(api/v1|r0|unstable)/publicRooms$
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/joined_members$
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/context/.*$
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/members$
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/state$
-    ^/_matrix/client/(api/v1|r0|unstable)/account/3pid$
-    ^/_matrix/client/(api/v1|r0|unstable)/devices$
-    ^/_matrix/client/(api/v1|r0|unstable)/keys/query$
-    ^/_matrix/client/(api/v1|r0|unstable)/keys/changes$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/createRoom$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/publicRooms$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/joined_members$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/context/.*$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/members$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/state$
+    ^/_matrix/client/unstable/org.matrix.msc2946/rooms/.*/spaces$
+    ^/_matrix/client/(v1|unstable/org.matrix.msc2946)/rooms/.*/hierarchy$
+    ^/_matrix/client/unstable/im.nheko.summary/rooms/.*/summary$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/account/3pid$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/devices$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/keys/query$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/keys/changes$
     ^/_matrix/client/versions$
-    ^/_matrix/client/(api/v1|r0|unstable)/voip/turnServer$
-    ^/_matrix/client/(api/v1|r0|unstable)/joined_groups$
-    ^/_matrix/client/(api/v1|r0|unstable)/publicised_groups$
-    ^/_matrix/client/(api/v1|r0|unstable)/publicised_groups/
-    ^/_synapse/client/password_reset/email/submit_token$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/voip/turnServer$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/joined_groups$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/publicised_groups$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/publicised_groups/
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/event/
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/joined_rooms$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/search$
 
     # Registration/login requests
-    ^/_matrix/client/(api/v1|r0|unstable)/login$
-    ^/_matrix/client/(r0|unstable)/register$
-    ^/_matrix/client/(r0|unstable)/auth/.*/fallback/web$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/login$
+    ^/_matrix/client/(r0|v3|unstable)/register$
+    ^/_matrix/client/unstable/org.matrix.msc3231/register/org.matrix.msc3231.login.registration_token/validity$
 
     # Event sending requests
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/redact
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/send
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/state/
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/(join|invite|leave|ban|unban|kick)$
-    ^/_matrix/client/(api/v1|r0|unstable)/join/
-    ^/_matrix/client/(api/v1|r0|unstable)/profile/
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/redact
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/send
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/state/
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/(join|invite|leave|ban|unban|kick)$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/join/
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/profile/
 
 
 Additionally, the following REST endpoints can be handled for GET requests:
@@ -250,30 +261,35 @@ room must be routed to the same instance. Additionally, care must be taken to
 ensure that the purge history admin API is not used while pagination requests
 for the room are in flight:
 
-    ^/_matrix/client/(api/v1|r0|unstable)/rooms/.*/messages$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/rooms/.*/messages$
 
 Additionally, the following endpoints should be included if Synapse is configured
 to use SSO (you only need to include the ones for whichever SSO provider you're
 using):
 
+    # for all SSO providers
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/login/sso/redirect
+    ^/_synapse/client/pick_idp$
+    ^/_synapse/client/pick_username
+    ^/_synapse/client/new_user_consent$
+    ^/_synapse/client/sso_register$
+
     # OpenID Connect requests.
-    ^/_matrix/client/(api/v1|r0|unstable)/login/sso/redirect$
-    ^/_synapse/oidc/callback$
+    ^/_synapse/client/oidc/callback$
 
     # SAML requests.
-    ^/_matrix/client/(api/v1|r0|unstable)/login/sso/redirect$
-    ^/_matrix/saml2/authn_response$
+    ^/_synapse/client/saml2/authn_response$
 
     # CAS requests.
-    ^/_matrix/client/(api/v1|r0|unstable)/login/(cas|sso)/redirect$
-    ^/_matrix/client/(api/v1|r0|unstable)/login/cas/ticket$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/login/cas/ticket$
+
+Ensure that all SSO logins go to a single process.
+For multiple workers not handling the SSO endpoints properly, see
+[#7530](https://github.com/matrix-org/synapse/issues/7530) and
+[#9427](https://github.com/matrix-org/synapse/issues/9427).
 
 Note that a HTTP listener with `client` and `federation` resources must be
 configured in the `worker_listeners` option in the worker config.
-
-Ensure that all SSO logins go to a single process (usually the main process). 
-For multiple workers not handling the SSO endpoints properly, see
-[#7530](https://github.com/matrix-org/synapse/issues/7530).
 
 #### Load balancing
 
@@ -367,7 +383,15 @@ Handles sending push notifications to sygnal and email. Doesn't handle any
 REST endpoints itself, but you should set `start_pushers: False` in the
 shared configuration file to stop the main synapse sending push notifications.
 
-Note this worker cannot be load-balanced: only one instance should be active.
+To run multiple instances at once the `pusher_instances` option should list all
+pusher instances by their worker name, e.g.:
+
+```yaml
+pusher_instances:
+    - pusher_worker1
+    - pusher_worker2
+```
+
 
 ### `synapse.app.appservice`
 
@@ -408,28 +432,30 @@ Handles the media repository. It can handle all endpoints starting with:
     ^/_synapse/admin/v1/user/.*/media.*$
     ^/_synapse/admin/v1/media/.*$
     ^/_synapse/admin/v1/quarantine_media/.*$
+    ^/_synapse/admin/v1/users/.*/media$
 
 You should also set `enable_media_repo: False` in the shared configuration
 file to stop the main synapse running background jobs related to managing the
-media repository.
+media repository. Note that doing so will prevent the main process from being
+able to handle the above endpoints.
 
 In the `media_repository` worker configuration file, configure the http listener to
 expose the `media` resource. For example:
 
 ```yaml
-    worker_listeners:
-     - type: http
-       port: 8085
-       resources:
-         - names:
-           - media
+worker_listeners:
+ - type: http
+   port: 8085
+   resources:
+     - names:
+       - media
 ```
 
 Note that if running multiple media repositories they must be on the same server
 and you must configure a single instance to run the background tasks, e.g.:
 
 ```yaml
-    media_instance_running_background_jobs: "media-repository-1"
+media_instance_running_background_jobs: "media-repository-1"
 ```
 
 Note that if a reverse proxy is used , then `/_matrix/media/` must be routed for both inbound client and federation requests (if they are handled separately).
@@ -439,7 +465,7 @@ Note that if a reverse proxy is used , then `/_matrix/media/` must be routed for
 Handles searches in the user directory. It can handle REST endpoints matching
 the following regular expressions:
 
-    ^/_matrix/client/(api/v1|r0|unstable)/user_directory/search$
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/user_directory/search$
 
 When using this worker you must also set `update_user_directory: False` in the
 shared configuration file to stop the main synapse running background
@@ -451,12 +477,12 @@ Proxies some frequently-requested client endpoints to add caching and remove
 load from the main synapse. It can handle REST endpoints matching the following
 regular expressions:
 
-    ^/_matrix/client/(api/v1|r0|unstable)/keys/upload
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/keys/upload
 
 If `use_presence` is False in the homeserver config, it can also handle REST
 endpoints matching the following regular expressions:
 
-    ^/_matrix/client/(api/v1|r0|unstable)/presence/[^/]+/status
+    ^/_matrix/client/(api/v1|r0|v3|unstable)/presence/[^/]+/status
 
 This "stub" presence handler will pass through `GET` request but make the
 `PUT` effectively a no-op.
@@ -466,7 +492,9 @@ must therefore be configured with the location of the main instance, via
 the `worker_main_http_uri` setting in the `frontend_proxy` worker configuration
 file. For example:
 
-    worker_main_http_uri: http://127.0.0.1:8008
+```yaml
+worker_main_http_uri: http://127.0.0.1:8008
+```
 
 ### Historical apps
 

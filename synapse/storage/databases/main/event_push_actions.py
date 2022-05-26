@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015 OpenMarket Ltd
 # Copyright 2018 New Vector Ltd
 #
@@ -14,15 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import attr
+from typing_extensions import TypedDict
 
 from synapse.metrics.background_process_metrics import wrap_as_background_process
 from synapse.storage._base import SQLBaseStore, db_to_json
 from synapse.storage.database import DatabasePool, LoggingTransaction
 from synapse.util import json_encoder
 from synapse.util.caches.descriptors import cached
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,20 @@ DEFAULT_HIGHLIGHT_ACTION = [
     {"set_tweak": "sound", "value": "default"},
     {"set_tweak": "highlight"},
 ]
+
+
+class BasePushAction(TypedDict):
+    event_id: str
+    actions: List[Union[dict, str]]
+
+
+class HttpPushAction(BasePushAction):
+    room_id: str
+    stream_ordering: int
+
+
+class EmailPushAction(HttpPushAction):
+    received_ts: Optional[int]
 
 
 def _serialize_action(actions, is_highlight):
@@ -54,8 +71,7 @@ def _serialize_action(actions, is_highlight):
 
 
 def _deserialize_action(actions, is_highlight):
-    """Custom deserializer for actions. This allows us to "compress" common actions
-    """
+    """Custom deserializer for actions. This allows us to "compress" common actions"""
     if actions:
         return db_to_json(actions)
 
@@ -66,7 +82,7 @@ def _deserialize_action(actions, is_highlight):
 
 
 class EventPushActionsWorkerStore(SQLBaseStore):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(self, database: DatabasePool, db_conn, hs: "HomeServer"):
         super().__init__(database, db_conn, hs)
 
         # These get correctly set by _find_stream_orderings_for_times_txn
@@ -84,14 +100,17 @@ class EventPushActionsWorkerStore(SQLBaseStore):
         self._rotate_delay = 3
         self._rotate_count = 10000
         self._doing_notif_rotation = False
-        if hs.config.run_background_tasks:
+        if hs.config.worker.run_background_tasks:
             self._rotate_notif_loop = self._clock.looping_call(
                 self._rotate_notifs, 30 * 60 * 1000
             )
 
     @cached(num_args=3, tree=True, max_entries=5000)
     async def get_unread_event_push_actions_by_room_for_user(
-        self, room_id: str, user_id: str, last_read_event_id: Optional[str],
+        self,
+        room_id: str,
+        user_id: str,
+        last_read_event_id: Optional[str],
     ) -> Dict[str, int]:
         """Get the notification count, the highlight count and the unread message count
         for a given user in a given room after the given read receipt.
@@ -120,13 +139,19 @@ class EventPushActionsWorkerStore(SQLBaseStore):
         )
 
     def _get_unread_counts_by_receipt_txn(
-        self, txn, room_id, user_id, last_read_event_id,
+        self,
+        txn,
+        room_id,
+        user_id,
+        last_read_event_id,
     ):
         stream_ordering = None
 
         if last_read_event_id is not None:
             stream_ordering = self.get_stream_id_for_event_txn(
-                txn, last_read_event_id, allow_none=True,
+                txn,
+                last_read_event_id,
+                allow_none=True,
             )
 
         if stream_ordering is None:
@@ -211,7 +236,7 @@ class EventPushActionsWorkerStore(SQLBaseStore):
         min_stream_ordering: int,
         max_stream_ordering: int,
         limit: int = 20,
-    ) -> List[dict]:
+    ) -> List[HttpPushAction]:
         """Get a list of the most recent unread push actions for a given user,
         within the given stream ordering range. Called by the httppusher.
 
@@ -316,7 +341,7 @@ class EventPushActionsWorkerStore(SQLBaseStore):
         min_stream_ordering: int,
         max_stream_ordering: int,
         limit: int = 20,
-    ) -> List[dict]:
+    ) -> List[EmailPushAction]:
         """Get a list of the most recent unread push actions for a given user,
         within the given stream ordering range. Called by the emailpusher
 
@@ -487,7 +512,7 @@ class EventPushActionsWorkerStore(SQLBaseStore):
                 VALUES (?, ?, ?, ?, ?, ?)
             """
 
-            txn.executemany(
+            txn.execute_batch(
                 sql,
                 (
                     _gen_entry(user_id, actions)
@@ -752,7 +777,7 @@ class EventPushActionsWorkerStore(SQLBaseStore):
         # object because we might not have the same amount of rows in each of them. To do
         # this, we use a dict indexed on the user ID and room ID to make it easier to
         # populate.
-        summaries = {}  # type: Dict[Tuple[str, str], _EventPushSummary]
+        summaries: Dict[Tuple[str, str], _EventPushSummary] = {}
         for row in txn:
             summaries[(row[0], row[1])] = _EventPushSummary(
                 unread_count=row[2],
@@ -803,7 +828,7 @@ class EventPushActionsWorkerStore(SQLBaseStore):
             ],
         )
 
-        txn.executemany(
+        txn.execute_batch(
             """
                 UPDATE event_push_summary
                 SET notif_count = ?, unread_count = ?, stream_ordering = ?
@@ -853,7 +878,7 @@ class EventPushActionsWorkerStore(SQLBaseStore):
                                   not be deleted.
         """
         txn.call_after(
-            self.get_unread_event_push_actions_by_room_for_user.invalidate_many,
+            self.get_unread_event_push_actions_by_room_for_user.invalidate,
             (room_id, user_id),
         )
 
@@ -885,7 +910,7 @@ class EventPushActionsWorkerStore(SQLBaseStore):
 class EventPushActionsStore(EventPushActionsWorkerStore):
     EPA_HIGHLIGHT_INDEX = "epa_highlight_index"
 
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(self, database: DatabasePool, db_conn, hs: "HomeServer"):
         super().__init__(database, db_conn, hs)
 
         self.db_pool.updates.register_background_index_update(

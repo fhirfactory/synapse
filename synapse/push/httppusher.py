@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 # Copyright 2017 New Vector Ltd
 #
@@ -15,22 +14,24 @@
 # limitations under the License.
 import logging
 import urllib.parse
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Union
 
 from prometheus_client import Counter
 
 from twisted.internet.error import AlreadyCalled, AlreadyCancelled
+from twisted.internet.interfaces import IDelayedCall
 
 from synapse.api.constants import EventTypes
 from synapse.events import EventBase
 from synapse.logging import opentracing
 from synapse.metrics.background_process_metrics import run_as_background_process
 from synapse.push import Pusher, PusherConfig, PusherConfigException
+from synapse.storage.databases.main.event_push_actions import HttpPushAction
 
 from . import push_rule_evaluator, push_tools
 
 if TYPE_CHECKING:
-    from synapse.app.homeserver import HomeServer
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +72,12 @@ class HttpPusher(Pusher):
         self.data = pusher_config.data
         self.backoff_delay = HttpPusher.INITIAL_BACKOFF_SEC
         self.failing_since = pusher_config.failing_since
-        self.timed_call = None
+        self.timed_call: Optional[IDelayedCall] = None
         self._is_processing = False
-        self._group_unread_count_by_room = hs.config.push_group_unread_count_by_room
+        self._group_unread_count_by_room = (
+            hs.config.push.push_group_unread_count_by_room
+        )
+        self._pusherpool = hs.get_pusherpool()
 
         self.data = pusher_config.data
         if self.data is None:
@@ -176,8 +180,10 @@ class HttpPusher(Pusher):
         Never call this directly: use _process which will only allow this to
         run once per pusher.
         """
-        unprocessed = await self.store.get_unread_push_actions_for_user_in_range_for_http(
-            self.user_id, self.last_stream_ordering, self.max_stream_ordering
+        unprocessed = (
+            await self.store.get_unread_push_actions_for_user_in_range_for_http(
+                self.user_id, self.last_stream_ordering, self.max_stream_ordering
+            )
         )
 
         logger.info(
@@ -204,12 +210,14 @@ class HttpPusher(Pusher):
                 http_push_processed_counter.inc()
                 self.backoff_delay = HttpPusher.INITIAL_BACKOFF_SEC
                 self.last_stream_ordering = push_action["stream_ordering"]
-                pusher_still_exists = await self.store.update_pusher_last_stream_ordering_and_success(
-                    self.app_id,
-                    self.pushkey,
-                    self.user_id,
-                    self.last_stream_ordering,
-                    self.clock.time_msec(),
+                pusher_still_exists = (
+                    await self.store.update_pusher_last_stream_ordering_and_success(
+                        self.app_id,
+                        self.pushkey,
+                        self.user_id,
+                        self.last_stream_ordering,
+                        self.clock.time_msec(),
+                    )
                 )
                 if not pusher_still_exists:
                     # The pusher has been deleted while we were processing, so
@@ -266,7 +274,7 @@ class HttpPusher(Pusher):
                     )
                     break
 
-    async def _process_one(self, push_action: dict) -> bool:
+    async def _process_one(self, push_action: HttpPushAction) -> bool:
         if "notify" not in push_action["actions"]:
             return True
 
@@ -284,17 +292,18 @@ class HttpPusher(Pusher):
         if rejected is False:
             return False
 
-        if isinstance(rejected, list) or isinstance(rejected, tuple):
+        if isinstance(rejected, (list, tuple)):
             for pk in rejected:
                 if pk != self.pushkey:
                     # for sanity, we only remove the pushkey if it
                     # was the one we actually sent...
                     logger.warning(
-                        ("Ignoring rejected pushkey %s because we didn't send it"), pk,
+                        ("Ignoring rejected pushkey %s because we didn't send it"),
+                        pk,
                     )
                 else:
                     logger.info("Pushkey %s was rejected: removing", pk)
-                    await self.hs.remove_pusher(self.app_id, pk, self.user_id)
+                    await self._pusherpool.remove_pusher(self.app_id, pk, self.user_id)
         return True
 
     async def _build_notification_dict(
@@ -359,7 +368,7 @@ class HttpPusher(Pusher):
         if event.type == "m.room.member" and event.is_state():
             d["notification"]["membership"] = event.content["membership"]
             d["notification"]["user_is_target"] = event.state_key == self.user_id
-        if self.hs.config.push_include_content and event.content:
+        if self.hs.config.push.push_include_content and event.content:
             d["notification"]["content"] = event.content
 
         # We no longer send aliases separately, instead, we send the human
@@ -395,10 +404,10 @@ class HttpPusher(Pusher):
             rejected = resp["rejected"]
         return rejected
 
-    async def _send_badge(self, badge):
+    async def _send_badge(self, badge: int) -> None:
         """
         Args:
-            badge (int): number of unread messages
+            badge: number of unread messages
         """
         logger.debug("Sending updated badge count %d to %s", badge, self.name)
         d = {

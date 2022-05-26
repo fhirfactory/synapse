@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-# Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2020-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,24 +11,58 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict
+import logging
+from typing import Any, Dict, Optional
+
+import attr
 
 from ._base import Config
 
+logger = logging.getLogger(__name__)
+
+LEGACY_TEMPLATE_DIR_WARNING = """
+This server's configuration file is using the deprecated 'template_dir' setting in the
+'sso' section. Support for this setting has been deprecated and will be removed in a
+future version of Synapse. Server admins should instead use the new
+'custom_templates_directory' setting documented here:
+https://matrix-org.github.io/synapse/latest/templates.html
+---------------------------------------------------------------------------------------"""
+
+
+@attr.s(frozen=True, auto_attribs=True)
+class SsoAttributeRequirement:
+    """Object describing a single requirement for SSO attributes."""
+
+    attribute: str
+    # If a value is not given, than the attribute must simply exist.
+    value: Optional[str]
+
+    JSON_SCHEMA = {
+        "type": "object",
+        "properties": {"attribute": {"type": "string"}, "value": {"type": "string"}},
+        "required": ["attribute", "value"],
+    }
+
 
 class SSOConfig(Config):
-    """SSO Configuration
-    """
+    """SSO Configuration"""
 
     section = "sso"
 
-    def read_config(self, config, **kwargs):
-        sso_config = config.get("sso") or {}  # type: Dict[str, Any]
+    def read_config(self, config, **kwargs) -> None:
+        sso_config: Dict[str, Any] = config.get("sso") or {}
 
         # The sso-specific template_dir
-        template_dir = sso_config.get("template_dir")
+        self.sso_template_dir = sso_config.get("template_dir")
+        if self.sso_template_dir is not None:
+            logger.warning(LEGACY_TEMPLATE_DIR_WARNING)
 
         # Read templates from disk
+        custom_template_directories = (
+            self.root.server.custom_template_directory,
+            self.sso_template_dir,
+        )
+
         (
             self.sso_login_idp_picker_template,
             self.sso_redirect_confirm_template,
@@ -48,7 +81,7 @@ class SSOConfig(Config):
                 "sso_auth_success.html",
                 "sso_auth_bad_user.html",
             ],
-            template_dir,
+            (td for td in custom_template_directories if td),
         )
 
         # These templates have no placeholders, so render them here
@@ -59,18 +92,27 @@ class SSOConfig(Config):
 
         self.sso_client_whitelist = sso_config.get("client_whitelist") or []
 
+        self.sso_update_profile_information = (
+            sso_config.get("update_profile_information") or False
+        )
+
         # Attempt to also whitelist the server's login fallback, since that fallback sets
         # the redirect URL to itself (so it can process the login token then return
         # gracefully to the client). This would make it pointless to ask the user for
         # confirmation, since the URL the confirmation page would be showing wouldn't be
         # the client's.
-        login_fallback_url = self.public_baseurl + "_matrix/static/client/login"
+        login_fallback_url = (
+            self.root.server.public_baseurl + "_matrix/static/client/login"
+        )
         self.sso_client_whitelist.append(login_fallback_url)
 
-    def generate_config_section(self, **kwargs):
+    def generate_config_section(self, **kwargs) -> str:
         return """\
         # Additional settings to use with single-sign on systems such as OpenID Connect,
         # SAML2 and CAS.
+        #
+        # Server admins can configure custom templates for pages related to SSO. See
+        # https://matrix-org.github.io/synapse/latest/templates.html for more information.
         #
         sso:
             # A list of client URLs which are whitelisted so that the user does not
@@ -84,103 +126,22 @@ class SSOConfig(Config):
             # hostname: "https://my.client/".
             #
             # The login fallback page (used by clients that don't natively support the
-            # required login flows) is automatically whitelisted in addition to any URLs
-            # in this list.
+            # required login flows) is whitelisted in addition to any URLs in this list.
             #
-            # By default, this list is empty.
+            # By default, this list contains only the login fallback page.
             #
             #client_whitelist:
             #  - https://riot.im/develop
             #  - https://my.custom.client/
 
-            # Directory in which Synapse will try to find the template files below.
-            # If not set, or the files named below are not found within the template
-            # directory, default templates from within the Synapse package will be used.
+            # Uncomment to keep a user's profile fields in sync with information from
+            # the identity provider. Currently only syncing the displayname is
+            # supported. Fields are checked on every SSO login, and are updated
+            # if necessary.
             #
-            # Synapse will look for the following templates in this directory:
+            # Note that enabling this option will override user profile information,
+            # regardless of whether users have opted-out of syncing that
+            # information when first signing in. Defaults to false.
             #
-            # * HTML page to prompt the user to choose an Identity Provider during
-            #   login: 'sso_login_idp_picker.html'.
-            #
-            #   This is only used if multiple SSO Identity Providers are configured.
-            #
-            #   When rendering, this template is given the following variables:
-            #     * redirect_url: the URL that the user will be redirected to after
-            #       login. Needs manual escaping (see
-            #       https://jinja.palletsprojects.com/en/2.11.x/templates/#html-escaping).
-            #
-            #     * server_name: the homeserver's name.
-            #
-            #     * providers: a list of available Identity Providers. Each element is
-            #       an object with the following attributes:
-            #         * idp_id: unique identifier for the IdP
-            #         * idp_name: user-facing name for the IdP
-            #
-            #   The rendered HTML page should contain a form which submits its results
-            #   back as a GET request, with the following query parameters:
-            #
-            #     * redirectUrl: the client redirect URI (ie, the `redirect_url` passed
-            #       to the template)
-            #
-            #     * idp: the 'idp_id' of the chosen IDP.
-            #
-            # * HTML page for a confirmation step before redirecting back to the client
-            #   with the login token: 'sso_redirect_confirm.html'.
-            #
-            #   When rendering, this template is given three variables:
-            #     * redirect_url: the URL the user is about to be redirected to. Needs
-            #                     manual escaping (see
-            #                     https://jinja.palletsprojects.com/en/2.11.x/templates/#html-escaping).
-            #
-            #     * display_url: the same as `redirect_url`, but with the query
-            #                    parameters stripped. The intention is to have a
-            #                    human-readable URL to show to users, not to use it as
-            #                    the final address to redirect to. Needs manual escaping
-            #                    (see https://jinja.palletsprojects.com/en/2.11.x/templates/#html-escaping).
-            #
-            #     * server_name: the homeserver's name.
-            #
-            # * HTML page which notifies the user that they are authenticating to confirm
-            #   an operation on their account during the user interactive authentication
-            #   process: 'sso_auth_confirm.html'.
-            #
-            #   When rendering, this template is given the following variables:
-            #     * redirect_url: the URL the user is about to be redirected to. Needs
-            #                     manual escaping (see
-            #                     https://jinja.palletsprojects.com/en/2.11.x/templates/#html-escaping).
-            #
-            #     * description: the operation which the user is being asked to confirm
-            #
-            # * HTML page shown after a successful user interactive authentication session:
-            #   'sso_auth_success.html'.
-            #
-            #   Note that this page must include the JavaScript which notifies of a successful authentication
-            #   (see https://matrix.org/docs/spec/client_server/r0.6.0#fallback).
-            #
-            #   This template has no additional variables.
-            #
-            # * HTML page shown after a user-interactive authentication session which
-            #   does not map correctly onto the expected user: 'sso_auth_bad_user.html'.
-            #
-            #   When rendering, this template is given the following variables:
-            #     * server_name: the homeserver's name.
-            #     * user_id_to_verify: the MXID of the user that we are trying to
-            #       validate.
-            #
-            # * HTML page shown during single sign-on if a deactivated user (according to Synapse's database)
-            #   attempts to login: 'sso_account_deactivated.html'.
-            #
-            #   This template has no additional variables.
-            #
-            # * HTML page to display to users if something goes wrong during the
-            #   OpenID Connect authentication process: 'sso_error.html'.
-            #
-            #   When rendering, this template is given two variables:
-            #     * error: the technical name of the error
-            #     * error_description: a human-readable message for the error
-            #
-            # You can see the default templates at:
-            # https://github.com/matrix-org/synapse/tree/master/synapse/res/templates
-            #
-            #template_dir: "res/templates"
+            #update_profile_information: true
         """

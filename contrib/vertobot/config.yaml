@@ -30,3 +30,6 @@ verto-dialog-params:
   callID: ""
   remote_caller_id_name: "Outbound Call"
   remote_caller_id_number: "9664"
+
+app_service_config_files:
+  - /var/lib/synapse/config/communicate-fhirbridge-link.yaml

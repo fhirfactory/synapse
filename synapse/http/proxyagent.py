@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,19 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-import os
 import re
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
+from urllib.request import (  # type: ignore[attr-defined]
+    getproxies_environment,
+    proxy_bypass_environment,
+)
 
 from zope.interface import implementer
 
 from twisted.internet import defer
 from twisted.internet.endpoints import HostnameEndpoint, wrapClientTLS
+from twisted.internet.interfaces import IReactorCore, IStreamClientEndpoint
 from twisted.python.failure import Failure
-from twisted.web.client import URI, BrowserLikePolicyForHTTPS, _AgentBase
+from twisted.web.client import (
+    URI,
+    BrowserLikePolicyForHTTPS,
+    HTTPConnectionPool,
+    _AgentBase,
+)
 from twisted.web.error import SchemeNotSupported
-from twisted.web.iweb import IAgent
+from twisted.web.http_headers import Headers
+from twisted.web.iweb import IAgent, IBodyProducer, IPolicyForHTTPS
 
-from synapse.http.connectproxyclient import HTTPConnectProxyEndpoint
+from synapse.http.connectproxyclient import HTTPConnectProxyEndpoint, ProxyCredentials
+from synapse.types import ISynapseReactor
 
 logger = logging.getLogger(__name__)
 
@@ -44,35 +56,42 @@ class ProxyAgent(_AgentBase):
                        reactor might have some blacklisting applied (i.e. for DNS queries),
                        but we need unblocked access to the proxy.
 
-        contextFactory (IPolicyForHTTPS): A factory for TLS contexts, to control the
+        contextFactory: A factory for TLS contexts, to control the
             verification parameters of OpenSSL.  The default is to use a
             `BrowserLikePolicyForHTTPS`, so unless you have special
             requirements you can leave this as-is.
 
-        connectTimeout (Optional[float]): The amount of time that this Agent will wait
+        connectTimeout: The amount of time that this Agent will wait
             for the peer to accept a connection, in seconds. If 'None',
             HostnameEndpoint's default (30s) will be used.
-
             This is used for connections to both proxies and destination servers.
 
-        bindAddress (bytes): The local address for client sockets to bind to.
+        bindAddress: The local address for client sockets to bind to.
 
-        pool (HTTPConnectionPool|None): connection pool to be used. If None, a
+        pool: connection pool to be used. If None, a
             non-persistent pool instance will be created.
+
+        use_proxy: Whether proxy settings should be discovered and used
+            from conventional environment variables.
+
+    Raises:
+        ValueError if use_proxy is set and the environment variables
+            contain an invalid proxy specification.
+        RuntimeError if no tls_options_factory is given for a https connection
     """
 
     def __init__(
         self,
-        reactor,
-        proxy_reactor=None,
-        contextFactory=BrowserLikePolicyForHTTPS(),
-        connectTimeout=None,
-        bindAddress=None,
-        pool=None,
-        http_proxy=None,
-        https_proxy=None,
-        no_proxy=None,
+        reactor: IReactorCore,
+        proxy_reactor: Optional[ISynapseReactor] = None,
+        contextFactory: Optional[IPolicyForHTTPS] = None,
+        connectTimeout: Optional[float] = None,
+        bindAddress: Optional[bytes] = None,
+        pool: Optional[HTTPConnectionPool] = None,
+        use_proxy: bool = False,
     ):
+        contextFactory = contextFactory or BrowserLikePolicyForHTTPS()
+
         _AgentBase.__init__(self, reactor, pool)
 
         if proxy_reactor is None:
@@ -80,25 +99,41 @@ class ProxyAgent(_AgentBase):
         else:
             self.proxy_reactor = proxy_reactor
 
-        self._endpoint_kwargs = {}
+        self._endpoint_kwargs: Dict[str, Any] = {}
         if connectTimeout is not None:
             self._endpoint_kwargs["timeout"] = connectTimeout
         if bindAddress is not None:
             self._endpoint_kwargs["bindAddress"] = bindAddress
 
-        self.http_proxy_endpoint = _http_proxy_endpoint(
-            http_proxy, self.proxy_reactor, **self._endpoint_kwargs
+        http_proxy = None
+        https_proxy = None
+        no_proxy = None
+        if use_proxy:
+            proxies = getproxies_environment()
+            http_proxy = proxies["http"].encode() if "http" in proxies else None
+            https_proxy = proxies["https"].encode() if "https" in proxies else None
+            no_proxy = proxies["no"] if "no" in proxies else None
+
+        self.http_proxy_endpoint, self.http_proxy_creds = http_proxy_endpoint(
+            http_proxy, self.proxy_reactor, contextFactory, **self._endpoint_kwargs
         )
 
-        self.https_proxy_endpoint = _http_proxy_endpoint(
-            https_proxy, self.proxy_reactor, **self._endpoint_kwargs
+        self.https_proxy_endpoint, self.https_proxy_creds = http_proxy_endpoint(
+            https_proxy, self.proxy_reactor, contextFactory, **self._endpoint_kwargs
         )
+
+        self.no_proxy = no_proxy
 
         self._policy_for_https = contextFactory
         self._reactor = reactor
-        self._no_proxy = _bytes_to_string(no_proxy)
 
-    def request(self, method, uri, headers=None, bodyProducer=None):
+    def request(
+        self,
+        method: bytes,
+        uri: bytes,
+        headers: Optional[Headers] = None,
+        bodyProducer: Optional[IBodyProducer] = None,
+    ) -> defer.Deferred:
         """
         Issue a request to the server indicated by the given uri.
 
@@ -110,16 +145,15 @@ class ProxyAgent(_AgentBase):
         See also: twisted.web.iweb.IAgent.request
 
         Args:
-            method (bytes): The request method to use, such as `GET`, `POST`, etc
+            method: The request method to use, such as `GET`, `POST`, etc
 
-            uri (bytes): The location of the resource to request.
+            uri: The location of the resource to request.
 
-            headers (Headers|None): Extra headers to send with the request
+            headers: Extra headers to send with the request
 
-            bodyProducer (IBodyProducer|None): An object which can generate bytes to
-                make up the body of this request (for example, the properly encoded
-                contents of a file for a file upload). Or, None if the request is to
-                have no body.
+            bodyProducer: An object which can generate bytes to make up the body of
+                this request (for example, the properly encoded contents of a file for
+                a file upload). Or, None if the request is to have no body.
 
         Returns:
             Deferred[IResponse]: completes when the header of the response has
@@ -136,26 +170,49 @@ class ProxyAgent(_AgentBase):
         """
         uri = uri.strip()
         if not _VALID_URI.match(uri):
-            raise ValueError("Invalid URI {!r}".format(uri))
+            raise ValueError(f"Invalid URI {uri!r}")
 
         parsed_uri = URI.fromBytes(uri)
-        pool_key = (parsed_uri.scheme, parsed_uri.host, parsed_uri.port)
+        pool_key = f"{parsed_uri.scheme!r}{parsed_uri.host!r}{parsed_uri.port}"
         request_path = parsed_uri.originForm
 
-        use_proxy_for_this_uri = not _should_bypass_proxies(_bytes_to_string(parsed_uri.host), parsed_uri.port, self._no_proxy)
+        should_skip_proxy = False
+        if self.no_proxy is not None:
+            should_skip_proxy = proxy_bypass_environment(
+                parsed_uri.host.decode(),
+                proxies={"no": self.no_proxy},
+            )
 
-        if use_proxy_for_this_uri and parsed_uri.scheme == b"http" and self.http_proxy_endpoint:
+        if (
+            parsed_uri.scheme == b"http"
+            and self.http_proxy_endpoint
+            and not should_skip_proxy
+        ):
+            # Determine whether we need to set Proxy-Authorization headers
+            if self.http_proxy_creds:
+                # Set a Proxy-Authorization header
+                if headers is None:
+                    headers = Headers()
+                headers.addRawHeader(
+                    b"Proxy-Authorization",
+                    self.http_proxy_creds.as_proxy_authorization_value(),
+                )
             # Cache *all* connections under the same key, since we are only
             # connecting to a single destination, the proxy:
-            pool_key = ("http-proxy", self.http_proxy_endpoint)
+            pool_key = "http-proxy"
             endpoint = self.http_proxy_endpoint
             request_path = uri
-        elif use_proxy_for_this_uri and parsed_uri.scheme == b"https" and self.https_proxy_endpoint:
+        elif (
+            parsed_uri.scheme == b"https"
+            and self.https_proxy_endpoint
+            and not should_skip_proxy
+        ):
             endpoint = HTTPConnectProxyEndpoint(
                 self.proxy_reactor,
                 self.https_proxy_endpoint,
                 parsed_uri.host,
                 parsed_uri.port,
+                self.https_proxy_creds,
             )
         else:
             # not using a proxy
@@ -183,92 +240,96 @@ class ProxyAgent(_AgentBase):
             pool_key, endpoint, method, parsed_uri, headers, bodyProducer, request_path
         )
 
-def _bytes_to_string(bytes_value):
-    if bytes_value is None:
-        return None
-    else:
-        return bytes_value.decode()
 
-
-def _should_bypass_proxies(hostname, port, no_proxy):
-    """
-    Returns whether we should bypass proxies or not.
-    Based on https://github.com/psf/requests/blob/master/requests/utils.py
-    NOTE: for simplicity IP addresses and CIDR ranges aren't supported in the no_proxy value, but could be copied in from the above URL if required
-    :rtype: bool
-    """
-    # Prioritize lowercase environment variables over uppercase
-    # to keep a consistent behaviour with other http projects (curl, wget).
-    get_env = lambda k: os.environ.get(k) or os.environ.get(k.upper())
-
-    # First check whether no_proxy is defined. If it is, check that the URL
-    # we're getting isn't in the no_proxy list.
-    if no_proxy is None:
-        # TODO Would normally not do this, but instead just let the client specify, to allow for client controlled behaviour.
-        # As we are currently copying over the synapse files when building the docker image, this saved on having to maintain the merging
-        # of three other files in the synapse source.  So this code still allows the client to specify the no_proxy in the constructor of this
-        # class, but if that value is not specified, then this code will look up the no_proxy value from the environment variables.        
-        no_proxy = get_env('no_proxy')
-    
-    # First check whether no_proxy is defined. If it is, check that the URL
-    # we're getting isn't in the no_proxy list.
-    if hostname is None:
-        # URLs don't always have hostnames, e.g. file:/// urls.
-        return True
-
-    if no_proxy:
-        # We need to check whether we match here. We need to see if we match
-        # the end of the hostname, both with and without the port.
-        no_proxy_array = (
-            host for host in no_proxy.replace(' ', '').split(',') if host
-        )
-
-        host_with_port = hostname
-        if port:
-            host_with_port += ':{}'.format(port)
-
-        for host in no_proxy_array:
-            if hostname.endswith(host) or host_with_port.endswith(host):
-                # The URL does match something in no_proxy, so we don't want
-                # to apply the proxies on this URL.
-                return True
-
-    return False
-    
-    
-def _http_proxy_endpoint(proxy, reactor, **kwargs):
+def http_proxy_endpoint(
+    proxy: Optional[bytes],
+    reactor: IReactorCore,
+    tls_options_factory: Optional[IPolicyForHTTPS],
+    **kwargs,
+) -> Tuple[Optional[IStreamClientEndpoint], Optional[ProxyCredentials]]:
     """Parses an http proxy setting and returns an endpoint for the proxy
 
     Args:
-        proxy (bytes|None):  the proxy setting
+        proxy: the proxy setting in the form: [scheme://][<username>:<password>@]<host>[:<port>]
+            This currently supports http:// and https:// proxies.
+            A hostname without scheme is assumed to be http.
+
         reactor: reactor to be used to connect to the proxy
+
+        tls_options_factory: the TLS options to use when connecting through a https proxy
+
         kwargs: other args to be passed to HostnameEndpoint
 
     Returns:
-        interfaces.IStreamClientEndpoint|None: endpoint to use to connect to the proxy,
-            or None
+        a tuple of
+            endpoint to use to connect to the proxy, or None
+            ProxyCredentials or if no credentials were found, or None
+
+    Raise:
+        ValueError if proxy has no hostname or unsupported scheme.
+        RuntimeError if no tls_options_factory is given for a https connection
     """
     if proxy is None:
-        return None
+        return None, None
 
-    # currently we only support hostname:port. Some apps also support
-    # protocol://<host>[:port], which allows a way of requiring a TLS connection to the
-    # proxy.
+    # Note: urlsplit/urlparse cannot be used here as that does not work (for Python
+    # 3.9+) on scheme-less proxies, e.g. host:port.
+    scheme, host, port, credentials = parse_proxy(proxy)
 
-    host, port = parse_host_port(proxy, default_port=1080)
-    return HostnameEndpoint(reactor, host, port, **kwargs)
+    proxy_endpoint = HostnameEndpoint(reactor, host, port, **kwargs)
+
+    if scheme == b"https":
+        if tls_options_factory:
+            tls_options = tls_options_factory.creatorForNetloc(host, port)
+            proxy_endpoint = wrapClientTLS(tls_options, proxy_endpoint)
+        else:
+            raise RuntimeError(
+                f"No TLS options for a https connection via proxy {proxy!s}"
+            )
+
+    return proxy_endpoint, credentials
 
 
-def parse_host_port(hostport, default_port=None):
-    # could have sworn we had one of these somewhere else...
-    if b":" in hostport:
-        host, port = hostport.rsplit(b":", 1)
-        try:
-            port = int(port)
-            return host, port
-        except ValueError:
-            # the thing after the : wasn't a valid port; presumably this is an
-            # IPv6 address.
-            pass
+def parse_proxy(
+    proxy: bytes, default_scheme: bytes = b"http", default_port: int = 1080
+) -> Tuple[bytes, bytes, int, Optional[ProxyCredentials]]:
+    """
+    Parse a proxy connection string.
 
-    return hostport, default_port
+    Given a HTTP proxy URL, breaks it down into components and checks that it
+    has a hostname (otherwise it is not useful to us when trying to find a
+    proxy) and asserts that the URL has a scheme we support.
+
+
+    Args:
+        proxy: The proxy connection string. Must be in the form '[scheme://][<username>:<password>@]host[:port]'.
+        default_scheme: The default scheme to return if one is not found in `proxy`. Defaults to http
+        default_port: The default port to return if one is not found in `proxy`. Defaults to 1080
+
+    Returns:
+        A tuple containing the scheme, hostname, port and ProxyCredentials.
+            If no credentials were found, the ProxyCredentials instance is replaced with None.
+
+    Raise:
+        ValueError if proxy has no hostname or unsupported scheme.
+    """
+    # First check if we have a scheme present
+    # Note: urlsplit/urlparse cannot be used (for Python # 3.9+) on scheme-less proxies, e.g. host:port.
+    if b"://" not in proxy:
+        proxy = b"".join([default_scheme, b"://", proxy])
+
+    url = urlparse(proxy)
+
+    if not url.hostname:
+        raise ValueError("Proxy URL did not contain a hostname! Please specify one.")
+
+    if url.scheme not in (b"http", b"https"):
+        raise ValueError(
+            f"Unknown proxy scheme {url.scheme!s}; only 'http' and 'https' is supported."
+        )
+
+    credentials = None
+    if url.username and url.password:
+        credentials = ProxyCredentials(b"".join([url.username, b":", url.password]))
+
+    return url.scheme, url.hostname, url.port or default_port, credentials

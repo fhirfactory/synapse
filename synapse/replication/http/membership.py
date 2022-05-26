@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2018 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,9 +14,10 @@
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
-from twisted.web.http import Request
+from twisted.web.server import Request
 
 from synapse.http.servlet import parse_json_object_from_request
+from synapse.http.site import SynapseRequest
 from synapse.replication.http._base import ReplicationEndpoint
 from synapse.types import JsonDict, Requester, UserID
 from synapse.util.distributor import user_left_room
@@ -45,7 +45,7 @@ class ReplicationRemoteJoinRestServlet(ReplicationEndpoint):
     NAME = "remote_join"
     PATH_ARGS = ("room_id", "user_id")
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
 
         self.federation_handler = hs.get_federation_handler()
@@ -78,8 +78,77 @@ class ReplicationRemoteJoinRestServlet(ReplicationEndpoint):
         }
 
     async def _handle_request(  # type: ignore
-        self, request: Request, room_id: str, user_id: str
+        self, request: SynapseRequest, room_id: str, user_id: str
     ) -> Tuple[int, JsonDict]:
+        content = parse_json_object_from_request(request)
+
+        remote_room_hosts = content["remote_room_hosts"]
+        event_content = content["content"]
+
+        requester = Requester.deserialize(self.store, content["requester"])
+        request.requester = requester
+
+        logger.info("remote_join: %s into room: %s", user_id, room_id)
+
+        event_id, stream_id = await self.federation_handler.do_invite_join(
+            remote_room_hosts, room_id, user_id, event_content
+        )
+
+        return 200, {"event_id": event_id, "stream_id": stream_id}
+
+
+class ReplicationRemoteKnockRestServlet(ReplicationEndpoint):
+    """Perform a remote knock for the given user on the given room
+
+    Request format:
+
+        POST /_synapse/replication/remote_knock/:room_id/:user_id
+
+        {
+            "requester": ...,
+            "remote_room_hosts": [...],
+            "content": { ... }
+        }
+    """
+
+    NAME = "remote_knock"
+    PATH_ARGS = ("room_id", "user_id")
+
+    def __init__(self, hs: "HomeServer"):
+        super().__init__(hs)
+
+        self.federation_handler = hs.get_federation_handler()
+        self.store = hs.get_datastore()
+        self.clock = hs.get_clock()
+
+    @staticmethod
+    async def _serialize_payload(  # type: ignore
+        requester: Requester,
+        room_id: str,
+        user_id: str,
+        remote_room_hosts: List[str],
+        content: JsonDict,
+    ):
+        """
+        Args:
+            requester: The user making the request, according to the access token.
+            room_id: The ID of the room to knock on.
+            user_id: The ID of the knocking user.
+            remote_room_hosts: Servers to try and send the knock via.
+            content: The event content to use for the knock event.
+        """
+        return {
+            "requester": requester.serialize(),
+            "remote_room_hosts": remote_room_hosts,
+            "content": content,
+        }
+
+    async def _handle_request(  # type: ignore
+        self,
+        request: SynapseRequest,
+        room_id: str,
+        user_id: str,
+    ):
         content = parse_json_object_from_request(request)
 
         remote_room_hosts = content["remote_room_hosts"]
@@ -89,9 +158,9 @@ class ReplicationRemoteJoinRestServlet(ReplicationEndpoint):
 
         request.requester = requester
 
-        logger.info("remote_join: %s into room: %s", user_id, room_id)
+        logger.debug("remote_knock: %s on room: %s", user_id, room_id)
 
-        event_id, stream_id = await self.federation_handler.do_invite_join(
+        event_id, stream_id = await self.federation_handler.do_knock(
             remote_room_hosts, room_id, user_id, event_content
         )
 
@@ -147,8 +216,76 @@ class ReplicationRemoteRejectInviteRestServlet(ReplicationEndpoint):
         }
 
     async def _handle_request(  # type: ignore
-        self, request: Request, invite_event_id: str
+        self, request: SynapseRequest, invite_event_id: str
     ) -> Tuple[int, JsonDict]:
+        content = parse_json_object_from_request(request)
+
+        txn_id = content["txn_id"]
+        event_content = content["content"]
+
+        requester = Requester.deserialize(self.store, content["requester"])
+        request.requester = requester
+
+        # hopefully we're now on the master, so this won't recurse!
+        event_id, stream_id = await self.member_handler.remote_reject_invite(
+            invite_event_id,
+            txn_id,
+            requester,
+            event_content,
+        )
+
+        return 200, {"event_id": event_id, "stream_id": stream_id}
+
+
+class ReplicationRemoteRescindKnockRestServlet(ReplicationEndpoint):
+    """Rescinds a local knock made on a remote room
+
+    Request format:
+
+        POST /_synapse/replication/remote_rescind_knock/:event_id
+
+        {
+            "txn_id": ...,
+            "requester": ...,
+            "content": { ... }
+        }
+    """
+
+    NAME = "remote_rescind_knock"
+    PATH_ARGS = ("knock_event_id",)
+
+    def __init__(self, hs: "HomeServer"):
+        super().__init__(hs)
+
+        self.store = hs.get_datastore()
+        self.clock = hs.get_clock()
+        self.member_handler = hs.get_room_member_handler()
+
+    @staticmethod
+    async def _serialize_payload(  # type: ignore
+        knock_event_id: str,
+        txn_id: Optional[str],
+        requester: Requester,
+        content: JsonDict,
+    ):
+        """
+        Args:
+            knock_event_id: The ID of the knock to be rescinded.
+            txn_id: An optional transaction ID supplied by the client.
+            requester: The user making the rescind request, according to the access token.
+            content: The content to include in the rescind event.
+        """
+        return {
+            "txn_id": txn_id,
+            "requester": requester.serialize(),
+            "content": content,
+        }
+
+    async def _handle_request(  # type: ignore
+        self,
+        request: SynapseRequest,
+        knock_event_id: str,
+    ):
         content = parse_json_object_from_request(request)
 
         txn_id = content["txn_id"]
@@ -159,8 +296,11 @@ class ReplicationRemoteRejectInviteRestServlet(ReplicationEndpoint):
         request.requester = requester
 
         # hopefully we're now on the master, so this won't recurse!
-        event_id, stream_id = await self.member_handler.remote_reject_invite(
-            invite_event_id, txn_id, requester, event_content,
+        event_id, stream_id = await self.member_handler.remote_rescind_knock(
+            knock_event_id,
+            txn_id,
+            requester,
+            event_content,
         )
 
         return 200, {"event_id": event_id, "stream_id": stream_id}
@@ -180,7 +320,7 @@ class ReplicationUserJoinedLeftRoomRestServlet(ReplicationEndpoint):
     PATH_ARGS = ("room_id", "user_id", "change")
     CACHE = False  # No point caching as should return instantly.
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
 
         self.registeration_handler = hs.get_registration_handler()
@@ -205,7 +345,7 @@ class ReplicationUserJoinedLeftRoomRestServlet(ReplicationEndpoint):
 
         return {}
 
-    def _handle_request(  # type: ignore
+    async def _handle_request(  # type: ignore
         self, request: Request, room_id: str, user_id: str, change: str
     ) -> Tuple[int, JsonDict]:
         logger.info("user membership change: %s in %s", user_id, room_id)
@@ -220,7 +360,7 @@ class ReplicationUserJoinedLeftRoomRestServlet(ReplicationEndpoint):
         return 200, {}
 
 
-def register_servlets(hs, http_server):
+def register_servlets(hs: "HomeServer", http_server):
     ReplicationRemoteJoinRestServlet(hs).register(http_server)
     ReplicationRemoteRejectInviteRestServlet(hs).register(http_server)
     ReplicationUserJoinedLeftRoomRestServlet(hs).register(http_server)

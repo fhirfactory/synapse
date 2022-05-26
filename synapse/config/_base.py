@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2017-2018 New Vector Ltd
 # Copyright 2019 The Matrix.org Foundation C.I.C.
@@ -18,17 +17,28 @@
 import argparse
 import errno
 import os
-import time
-import urllib.parse
 from collections import OrderedDict
 from hashlib import sha256
 from textwrap import dedent
-from typing import Any, Callable, Iterable, List, MutableMapping, Optional
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    MutableMapping,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 import attr
 import jinja2
 import pkg_resources
 import yaml
+
+from synapse.util.templates import _create_mxc_to_http_filter, _format_ts_filter
 
 
 class ConfigError(Exception):
@@ -79,7 +89,7 @@ CONFIG_FILE_HEADER = """\
 """
 
 
-def path_exists(file_path):
+def path_exists(file_path: str) -> bool:
     """Check if a file exists
 
     Unlike os.path.exists, this throws an exception if there is an error
@@ -87,7 +97,7 @@ def path_exists(file_path):
     the parent dir).
 
     Returns:
-        bool: True if the file exists; False if not.
+        True if the file exists; False if not.
     """
     try:
         os.stat(file_path)
@@ -103,15 +113,15 @@ class Config:
     A configuration section, containing configuration keys and values.
 
     Attributes:
-        section (str): The section title of this config object, such as
+        section: The section title of this config object, such as
             "tls" or "logger". This is used to refer to it on the root
             logger (for example, `config.tls.some_option`). Must be
             defined in subclasses.
     """
 
-    section = None
+    section: str
 
-    def __init__(self, root_config=None):
+    def __init__(self, root_config: "RootConfig" = None):
         self.root = root_config
 
         # Get the path to the default Synapse template directory
@@ -119,23 +129,8 @@ class Config:
             "synapse", "res/templates"
         )
 
-    def __getattr__(self, item: str) -> Any:
-        """
-        Try and fetch a configuration option that does not exist on this class.
-
-        This is so that existing configs that rely on `self.value`, where value
-        is actually from a different config section, continue to work.
-        """
-        if item in ["generate_config_section", "read_config"]:
-            raise AttributeError(item)
-
-        if self.root is None:
-            raise AttributeError(item)
-        else:
-            return self.root._get_unclassed_config(self.section, item)
-
     @staticmethod
-    def parse_size(value):
+    def parse_size(value: Union[str, int]) -> int:
         if isinstance(value, int):
             return value
         sizes = {"K": 1024, "M": 1024 * 1024}
@@ -147,7 +142,20 @@ class Config:
         return int(value) * size
 
     @staticmethod
-    def parse_duration(value):
+    def parse_duration(value: Union[str, int]) -> int:
+        """Convert a duration as a string or integer to a number of milliseconds.
+
+        If an integer is provided it is treated as milliseconds and is unchanged.
+
+        String durations can have a suffix of 's', 'm', 'h', 'd', 'w', or 'y'.
+        No suffix is treated as milliseconds.
+
+        Args:
+            value: The duration to parse.
+
+        Returns:
+            The number of milliseconds in the duration.
+        """
         if isinstance(value, int):
             return value
         second = 1000
@@ -165,15 +173,15 @@ class Config:
         return int(value) * size
 
     @staticmethod
-    def abspath(file_path):
+    def abspath(file_path: str) -> str:
         return os.path.abspath(file_path) if file_path else file_path
 
     @classmethod
-    def path_exists(cls, file_path):
+    def path_exists(cls, file_path: str) -> bool:
         return path_exists(file_path)
 
     @classmethod
-    def check_file(cls, file_path, config_name):
+    def check_file(cls, file_path: Optional[str], config_name: str) -> str:
         if file_path is None:
             raise ConfigError("Missing config for %s." % (config_name,))
         try:
@@ -186,45 +194,58 @@ class Config:
         return cls.abspath(file_path)
 
     @classmethod
-    def ensure_directory(cls, dir_path):
+    def ensure_directory(cls, dir_path: str) -> str:
         dir_path = cls.abspath(dir_path)
-        try:
-            os.makedirs(dir_path)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
+        os.makedirs(dir_path, exist_ok=True)
         if not os.path.isdir(dir_path):
             raise ConfigError("%s is not a directory" % (dir_path,))
         return dir_path
 
     @classmethod
-    def read_file(cls, file_path, config_name):
-        cls.check_file(file_path, config_name)
-        with open(file_path) as file_stream:
-            return file_stream.read()
+    def read_file(cls, file_path: Any, config_name: str) -> str:
+        """Deprecated: call read_file directly"""
+        return read_file(file_path, (config_name,))
+
+    def read_template(self, filename: str) -> jinja2.Template:
+        """Load a template file from disk.
+
+        This function will attempt to load the given template from the default Synapse
+        template directory.
+
+        Files read are treated as Jinja templates. The templates is not rendered yet
+        and has autoescape enabled.
+
+        Args:
+            filename: A template filename to read.
+
+        Raises:
+            ConfigError: if the file's path is incorrect or otherwise cannot be read.
+
+        Returns:
+            A jinja2 template.
+        """
+        return self.read_templates([filename])[0]
 
     def read_templates(
         self,
         filenames: List[str],
-        custom_template_directory: Optional[str] = None,
-        autoescape: bool = False,
+        custom_template_directories: Optional[Iterable[str]] = None,
     ) -> List[jinja2.Template]:
         """Load a list of template files from disk using the given variables.
 
         This function will attempt to load the given templates from the default Synapse
-        template directory. If `custom_template_directory` is supplied, that directory
-        is tried first.
+        template directory. If `custom_template_directories` is supplied, any directory
+        in this list is tried (in the order they appear in the list) before trying
+        Synapse's default directory.
 
-        Files read are treated as Jinja templates. These templates are not rendered yet.
+        Files read are treated as Jinja templates. The templates are not rendered yet
+        and have autoescape enabled.
 
         Args:
             filenames: A list of template filenames to read.
 
-            custom_template_directory: A directory to try to look for the templates
-                before using the default Synapse template directory instead.
-
-            autoescape: Whether to autoescape variables before inserting them into the
-                template.
+            custom_template_directories: A list of directory to try to look for the
+                templates before using the default Synapse template directory instead.
 
         Raises:
             ConfigError: if the file's path is incorrect or otherwise cannot be read.
@@ -232,71 +253,49 @@ class Config:
         Returns:
             A list of jinja2 templates.
         """
-        templates = []
-        search_directories = [self.default_template_dir]
+        search_directories = []
 
-        # The loader will first look in the custom template directory (if specified) for the
-        # given filename. If it doesn't find it, it will use the default template dir instead
-        if custom_template_directory:
-            # Check that the given template directory exists
-            if not self.path_exists(custom_template_directory):
-                raise ConfigError(
-                    "Configured template directory does not exist: %s"
-                    % (custom_template_directory,)
-                )
+        # The loader will first look in the custom template directories (if specified)
+        # for the given filename. If it doesn't find it, it will use the default
+        # template dir instead.
+        if custom_template_directories is not None:
+            for custom_template_directory in custom_template_directories:
+                # Check that the given template directory exists
+                if not self.path_exists(custom_template_directory):
+                    raise ConfigError(
+                        "Configured template directory does not exist: %s"
+                        % (custom_template_directory,)
+                    )
 
-            # Search the custom template directory as well
-            search_directories.insert(0, custom_template_directory)
+                # Search the custom template directory as well
+                search_directories.append(custom_template_directory)
 
+        # Append the default directory at the end of the list so Jinja can fallback on it
+        # if a template is missing from any custom directory.
+        search_directories.append(self.default_template_dir)
+
+        # TODO: switch to synapse.util.templates.build_jinja_env
         loader = jinja2.FileSystemLoader(search_directories)
-        env = jinja2.Environment(loader=loader, autoescape=autoescape)
+        env = jinja2.Environment(
+            loader=loader,
+            autoescape=jinja2.select_autoescape(),
+        )
 
         # Update the environment with our custom filters
         env.filters.update(
             {
                 "format_ts": _format_ts_filter,
-                "mxc_to_http": _create_mxc_to_http_filter(self.public_baseurl),
+                "mxc_to_http": _create_mxc_to_http_filter(
+                    self.root.server.public_baseurl
+                ),
             }
         )
 
-        for filename in filenames:
-            # Load the template
-            template = env.get_template(filename)
-            templates.append(template)
-
-        return templates
+        # Load the templates
+        return [env.get_template(filename) for filename in filenames]
 
 
-def _format_ts_filter(value: int, format: str):
-    return time.strftime(format, time.localtime(value / 1000))
-
-
-def _create_mxc_to_http_filter(public_baseurl: str) -> Callable:
-    """Create and return a jinja2 filter that converts MXC urls to HTTP
-
-    Args:
-        public_baseurl: The public, accessible base URL of the homeserver
-    """
-
-    def mxc_to_http_filter(value, width, height, resize_method="crop"):
-        if value[0:6] != "mxc://":
-            return ""
-
-        server_and_media_id = value[6:]
-        fragment = None
-        if "#" in server_and_media_id:
-            server_and_media_id, fragment = server_and_media_id.split("#", 1)
-            fragment = "#" + fragment
-
-        params = {"width": width, "height": height, "method": resize_method}
-        return "%s_matrix/media/v1/thumbnail/%s?%s%s" % (
-            public_baseurl,
-            server_and_media_id,
-            urllib.parse.urlencode(params),
-            fragment or "",
-        )
-
-    return mxc_to_http_filter
+TRootConfig = TypeVar("TRootConfig", bound="RootConfig")
 
 
 class RootConfig:
@@ -313,8 +312,6 @@ class RootConfig:
     config_classes = []
 
     def __init__(self):
-        self._configs = OrderedDict()
-
         for config_class in self.config_classes:
             if config_class.section is None:
                 raise ValueError("%r requires a section name" % (config_class,))
@@ -323,44 +320,11 @@ class RootConfig:
                 conf = config_class(self)
             except Exception as e:
                 raise Exception("Failed making %s: %r" % (config_class.section, e))
-            self._configs[config_class.section] = conf
+            setattr(self, config_class.section, conf)
 
-    def __getattr__(self, item: str) -> Any:
-        """
-        Redirect lookups on this object either to config objects, or values on
-        config objects, so that `config.tls.blah` works, as well as legacy uses
-        of things like `config.server_name`. It will first look up the config
-        section name, and then values on those config classes.
-        """
-        if item in self._configs.keys():
-            return self._configs[item]
-
-        return self._get_unclassed_config(None, item)
-
-    def _get_unclassed_config(self, asking_section: Optional[str], item: str):
-        """
-        Fetch a config value from one of the instantiated config classes that
-        has not been fetched directly.
-
-        Args:
-            asking_section: If this check is coming from a Config child, which
-                one? This section will not be asked if it has the value.
-            item: The configuration value key.
-
-        Raises:
-            AttributeError if no config classes have the config key. The body
-                will contain what sections were checked.
-        """
-        for key, val in self._configs.items():
-            if key == asking_section:
-                continue
-
-            if item in dir(val):
-                return getattr(val, item)
-
-        raise AttributeError(item, "not found in %s" % (list(self._configs.keys()),))
-
-    def invoke_all(self, func_name: str, *args, **kwargs) -> MutableMapping[str, Any]:
+    def invoke_all(
+        self, func_name: str, *args: Any, **kwargs: Any
+    ) -> MutableMapping[str, Any]:
         """
         Invoke a function on all instantiated config objects this RootConfig is
         configured to use.
@@ -369,20 +333,23 @@ class RootConfig:
             func_name: Name of function to invoke
             *args
             **kwargs
+
         Returns:
             ordered dictionary of config section name and the result of the
             function from it.
         """
         res = OrderedDict()
 
-        for name, config in self._configs.items():
+        for config_class in self.config_classes:
+            config = getattr(self, config_class.section)
+
             if hasattr(config, func_name):
-                res[name] = getattr(config, func_name)(*args, **kwargs)
+                res[config_class.section] = getattr(config, func_name)(*args, **kwargs)
 
         return res
 
     @classmethod
-    def invoke_all_static(cls, func_name: str, *args, **kwargs):
+    def invoke_all_static(cls, func_name: str, *args: Any, **kwargs: any) -> None:
         """
         Invoke a static function on config objects this RootConfig is
         configured to use.
@@ -391,6 +358,7 @@ class RootConfig:
             func_name: Name of function to invoke
             *args
             **kwargs
+
         Returns:
             ordered dictionary of config section name and the result of the
             function from it.
@@ -401,17 +369,16 @@ class RootConfig:
 
     def generate_config(
         self,
-        config_dir_path,
-        data_dir_path,
-        server_name,
-        generate_secrets=False,
-        report_stats=None,
-        open_private_ports=False,
-        listeners=None,
-        tls_certificate_path=None,
-        tls_private_key_path=None,
-        acme_domain=None,
-    ):
+        config_dir_path: str,
+        data_dir_path: str,
+        server_name: str,
+        generate_secrets: bool = False,
+        report_stats: Optional[bool] = None,
+        open_private_ports: bool = False,
+        listeners: Optional[List[dict]] = None,
+        tls_certificate_path: Optional[str] = None,
+        tls_private_key_path: Optional[str] = None,
+    ) -> str:
         """
         Build a default configuration file
 
@@ -419,27 +386,27 @@ class RootConfig:
         (eg with --generate_config).
 
         Args:
-            config_dir_path (str): The path where the config files are kept. Used to
+            config_dir_path: The path where the config files are kept. Used to
                 create filenames for things like the log config and the signing key.
 
-            data_dir_path (str): The path where the data files are kept. Used to create
+            data_dir_path: The path where the data files are kept. Used to create
                 filenames for things like the database and media store.
 
-            server_name (str): The server name. Used to initialise the server_name
+            server_name: The server name. Used to initialise the server_name
                 config param, but also used in the names of some of the config files.
 
-            generate_secrets (bool): True if we should generate new secrets for things
+            generate_secrets: True if we should generate new secrets for things
                 like the macaroon_secret_key. If False, these parameters will be left
                 unset.
 
-            report_stats (bool|None): Initial setting for the report_stats setting.
+            report_stats: Initial setting for the report_stats setting.
                 If None, report_stats will be left unset.
 
-            open_private_ports (bool): True to leave private ports (such as the non-TLS
+            open_private_ports: True to leave private ports (such as the non-TLS
                 HTTP listener) open to the internet.
 
-            listeners (list(dict)|None): A list of descriptions of the listeners
-                synapse should start with each of which specifies a port (str), a list of
+            listeners: A list of descriptions of the listeners synapse should
+                start with each of which specifies a port (int), a list of
                 resources (list(str)), tls (bool) and type (str). For example:
                 [{
                     "port": 8448,
@@ -454,19 +421,12 @@ class RootConfig:
                     "type": "http",
                 }],
 
+            tls_certificate_path: The path to the tls certificate.
 
-            database (str|None): The database type to configure, either `psycog2`
-                or `sqlite3`.
-
-            tls_certificate_path (str|None): The path to the tls certificate.
-
-            tls_private_key_path (str|None): The path to the tls private key.
-
-            acme_domain (str|None): The domain acme will try to validate. If
-                specified acme will be enabled.
+            tls_private_key_path: The path to the tls private key.
 
         Returns:
-            str: the yaml config file
+            The yaml config file
         """
 
         return CONFIG_FILE_HEADER + "\n\n".join(
@@ -482,17 +442,19 @@ class RootConfig:
                 listeners=listeners,
                 tls_certificate_path=tls_certificate_path,
                 tls_private_key_path=tls_private_key_path,
-                acme_domain=acme_domain,
             ).values()
         )
 
     @classmethod
-    def load_config(cls, description, argv):
+    def load_config(
+        cls: Type[TRootConfig], description: str, argv: List[str]
+    ) -> TRootConfig:
         """Parse the commandline and config files
 
         Doesn't support config-file-generation: used by the worker apps.
 
-        Returns: Config object.
+        Returns:
+            Config object.
         """
         config_parser = argparse.ArgumentParser(description=description)
         cls.add_arguments_to_parser(config_parser)
@@ -501,7 +463,7 @@ class RootConfig:
         return obj
 
     @classmethod
-    def add_arguments_to_parser(cls, config_parser):
+    def add_arguments_to_parser(cls, config_parser: argparse.ArgumentParser) -> None:
         """Adds all the config flags to an ArgumentParser.
 
         Doesn't support config-file-generation: used by the worker apps.
@@ -509,7 +471,7 @@ class RootConfig:
         Used for workers where we want to add extra flags/subcommands.
 
         Args:
-            config_parser (ArgumentParser): App description
+            config_parser: App description
         """
 
         config_parser.add_argument(
@@ -532,7 +494,9 @@ class RootConfig:
         cls.invoke_all_static("add_arguments", config_parser)
 
     @classmethod
-    def load_config_with_parser(cls, parser, argv):
+    def load_config_with_parser(
+        cls: Type[TRootConfig], parser: argparse.ArgumentParser, argv: List[str]
+    ) -> Tuple[TRootConfig, argparse.Namespace]:
         """Parse the commandline and config files with the given parser
 
         Doesn't support config-file-generation: used by the worker apps.
@@ -540,13 +504,12 @@ class RootConfig:
         Used for workers where we want to add extra flags/subcommands.
 
         Args:
-            parser (ArgumentParser)
-            argv (list[str])
+            parser
+            argv
 
         Returns:
-            tuple[HomeServerConfig, argparse.Namespace]: Returns the parsed
-            config object and the parsed argparse.Namespace object from
-            `parser.parse_args(..)`
+            Returns the parsed config object and the parsed argparse.Namespace
+            object from parser.parse_args(..)`
         """
 
         obj = cls()
@@ -575,12 +538,15 @@ class RootConfig:
         return obj, config_args
 
     @classmethod
-    def load_or_generate_config(cls, description, argv):
+    def load_or_generate_config(
+        cls: Type[TRootConfig], description: str, argv: List[str]
+    ) -> Optional[TRootConfig]:
         """Parse the commandline and config files
 
         Supports generation of config files, so is used for the main homeserver app.
 
-        Returns: Config object, or None if --generate-config or --generate-keys was set
+        Returns:
+            Config object, or None if --generate-config or --generate-keys was set
         """
         parser = argparse.ArgumentParser(description=description)
         parser.add_argument(
@@ -696,8 +662,7 @@ class RootConfig:
                     open_private_ports=config_args.open_private_ports,
                 )
 
-                if not path_exists(config_dir_path):
-                    os.makedirs(config_dir_path)
+                os.makedirs(config_dir_path, exist_ok=True)
                 with open(config_path, "w") as config_file:
                     config_file.write(config_str)
                     config_file.write("\n\n# vim:ft=yaml")
@@ -736,16 +701,21 @@ class RootConfig:
 
         return obj
 
-    def parse_config_dict(self, config_dict, config_dir_path=None, data_dir_path=None):
+    def parse_config_dict(
+        self,
+        config_dict: Dict[str, Any],
+        config_dir_path: Optional[str] = None,
+        data_dir_path: Optional[str] = None,
+    ) -> None:
         """Read the information from the config dict into this Config object.
 
         Args:
-            config_dict (dict): Configuration data, as read from the yaml
+            config_dict: Configuration data, as read from the yaml
 
-            config_dir_path (str): The path where the config files are kept. Used to
+            config_dir_path: The path where the config files are kept. Used to
                 create filenames for things like the log config and the signing key.
 
-            data_dir_path (str): The path where the data files are kept. Used to create
+            data_dir_path: The path where the data files are kept. Used to create
                 filenames for things like the database and media store.
         """
         self.invoke_all(
@@ -755,17 +725,20 @@ class RootConfig:
             data_dir_path=data_dir_path,
         )
 
-    def generate_missing_files(self, config_dict, config_dir_path):
+    def generate_missing_files(
+        self, config_dict: Dict[str, Any], config_dir_path: str
+    ) -> None:
         self.invoke_all("generate_files", config_dict, config_dir_path)
 
 
-def read_config_files(config_files):
+def read_config_files(config_files: Iterable[str]) -> Dict[str, Any]:
     """Read the config files into a dict
 
     Args:
-        config_files (iterable[str]): A list of the config files to read
+        config_files: A list of the config files to read
 
-    Returns: dict
+    Returns:
+        The configuration dictionary.
     """
     specified_config = {}
     for config_file in config_files:
@@ -789,17 +762,17 @@ def read_config_files(config_files):
     return specified_config
 
 
-def find_config_files(search_paths):
+def find_config_files(search_paths: List[str]) -> List[str]:
     """Finds config files using a list of search paths. If a path is a file
     then that file path is added to the list. If a search path is a directory
     then all the "*.yaml" files in that directory are added to the list in
     sorted order.
 
     Args:
-        search_paths(list(str)): A list of paths to search.
+        search_paths: A list of paths to search.
 
     Returns:
-        list(str): A list of file paths.
+        A list of file paths.
     """
 
     config_files = []
@@ -833,7 +806,7 @@ def find_config_files(search_paths):
     return config_files
 
 
-@attr.s
+@attr.s(auto_attribs=True)
 class ShardedWorkerHandlingConfig:
     """Algorithm for choosing which instance is responsible for handling some
     sharded work.
@@ -843,27 +816,27 @@ class ShardedWorkerHandlingConfig:
     below).
     """
 
-    instances = attr.ib(type=List[str])
+    instances: List[str]
 
     def should_handle(self, instance_name: str, key: str) -> bool:
-        """Whether this instance is responsible for handling the given key.
-        """
-        # If multiple instances are not defined we always return true
-        if not self.instances or len(self.instances) == 1:
-            return True
+        """Whether this instance is responsible for handling the given key."""
+        # If no instances are defined we assume some other worker is handling
+        # this.
+        if not self.instances:
+            return False
 
-        return self.get_instance(key) == instance_name
+        return self._get_instance(key) == instance_name
 
-    def get_instance(self, key: str) -> str:
+    def _get_instance(self, key: str) -> str:
         """Get the instance responsible for handling the given key.
 
-        Note: For things like federation sending the config for which instance
-        is sending is known only to the sender instance if there is only one.
-        Therefore `should_handle` should be used where possible.
+        Note: For federation sending and pushers the config for which instance
+        is sending is known only to the sender instance, so we don't expose this
+        method by default.
         """
 
         if not self.instances:
-            return "master"
+            raise Exception("Unknown worker")
 
         if len(self.instances) == 1:
             return self.instances[0]
@@ -880,4 +853,52 @@ class ShardedWorkerHandlingConfig:
         return self.instances[remainder]
 
 
-__all__ = ["Config", "RootConfig", "ShardedWorkerHandlingConfig"]
+@attr.s
+class RoutableShardedWorkerHandlingConfig(ShardedWorkerHandlingConfig):
+    """A version of `ShardedWorkerHandlingConfig` that is used for config
+    options where all instances know which instances are responsible for the
+    sharded work.
+    """
+
+    def __attrs_post_init__(self):
+        # We require that `self.instances` is non-empty.
+        if not self.instances:
+            raise Exception("Got empty list of instances for shard config")
+
+    def get_instance(self, key: str) -> str:
+        """Get the instance responsible for handling the given key."""
+        return self._get_instance(key)
+
+
+def read_file(file_path: Any, config_path: Iterable[str]) -> str:
+    """Check the given file exists, and read it into a string
+
+    If it does not, emit an error indicating the problem
+
+    Args:
+        file_path: the file to be read
+        config_path: where in the configuration file_path came from, so that a useful
+           error can be emitted if it does not exist.
+    Returns:
+        content of the file.
+    Raises:
+        ConfigError if there is a problem reading the file.
+    """
+    if not isinstance(file_path, str):
+        raise ConfigError("%r is not a string", config_path)
+
+    try:
+        os.stat(file_path)
+        with open(file_path) as file_stream:
+            return file_stream.read()
+    except OSError as e:
+        raise ConfigError("Error accessing file %r" % (file_path,), config_path) from e
+
+
+__all__ = [
+    "Config",
+    "RootConfig",
+    "ShardedWorkerHandlingConfig",
+    "RoutableShardedWorkerHandlingConfig",
+    "read_file",
+]

@@ -12,12 +12,18 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from mock import Mock, patch
+from unittest.mock import Mock, patch
 
 import synapse.rest.admin
 from synapse.api.constants import EventTypes
-from synapse.rest.client.v1 import directory, login, profile, room
-from synapse.rest.client.v2_alpha import room_upgrade_rest_servlet
+from synapse.rest.client import (
+    directory,
+    login,
+    profile,
+    room,
+    room_upgrade_rest_servlet,
+)
+from synapse.types import UserID
 
 from tests import unittest
 
@@ -31,12 +37,7 @@ class _ShadowBannedBase(unittest.HomeserverTestCase):
         self.store = self.hs.get_datastore()
 
         self.get_success(
-            self.store.db_pool.simple_update(
-                table="users",
-                keyvalues={"name": self.banned_user_id},
-                updatevalues={"shadow_banned": True},
-                desc="shadow_ban",
-            )
+            self.store.set_shadow_banned(UserID.from_string(self.banned_user_id), True)
         )
 
         self.other_user_id = self.register_user("otheruser", "pass")
@@ -192,7 +193,7 @@ class RoomTestCase(_ShadowBannedBase):
         self.assertEquals(200, channel.code)
 
         # There should be no typing events.
-        event_source = self.hs.get_event_sources().sources["typing"]
+        event_source = self.hs.get_event_sources().sources.typing
         self.assertEquals(event_source.get_current_key(), 0)
 
         # The other user can join and send typing events.
@@ -209,7 +210,13 @@ class RoomTestCase(_ShadowBannedBase):
         # These appear in the room.
         self.assertEquals(event_source.get_current_key(), 1)
         events = self.get_success(
-            event_source.get_new_events(from_key=0, room_ids=[room_id])
+            event_source.get_new_events(
+                user=UserID.from_string(self.other_user_id),
+                from_key=0,
+                limit=None,
+                room_ids=[room_id],
+                is_guest=False,
+            )
         )
         self.assertEquals(
             events[0],
@@ -264,7 +271,10 @@ class ProfileTestCase(_ShadowBannedBase):
         message_handler = self.hs.get_message_handler()
         event = self.get_success(
             message_handler.get_room_data(
-                self.banned_user_id, room_id, "m.room.member", self.banned_user_id,
+                self.banned_user_id,
+                room_id,
+                "m.room.member",
+                self.banned_user_id,
             )
         )
         self.assertEqual(
@@ -296,7 +306,10 @@ class ProfileTestCase(_ShadowBannedBase):
         message_handler = self.hs.get_message_handler()
         event = self.get_success(
             message_handler.get_room_data(
-                self.banned_user_id, room_id, "m.room.member", self.banned_user_id,
+                self.banned_user_id,
+                room_id,
+                "m.room.member",
+                self.banned_user_id,
             )
         )
         self.assertEqual(

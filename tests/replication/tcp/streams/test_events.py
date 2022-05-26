@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,7 +24,7 @@ from synapse.replication.tcp.streams.events import (
     EventsStreamRow,
 )
 from synapse.rest import admin
-from synapse.rest.client.v1 import login, room
+from synapse.rest.client import login, room
 
 from tests.replication._base import BaseStreamTestCase
 from tests.test_utils.event_injection import inject_event, inject_member_event
@@ -129,13 +128,16 @@ class EventsStreamTestCase(BaseStreamTestCase):
         )
         pls["users"][OTHER_USER] = 50
         self.helper.send_state(
-            self.room_id, EventTypes.PowerLevels, pls, tok=self.user_tok,
+            self.room_id,
+            EventTypes.PowerLevels,
+            pls,
+            tok=self.user_tok,
         )
 
         # this is the point in the DAG where we make a fork
-        fork_point = self.get_success(
+        fork_point: List[str] = self.get_success(
             self.hs.get_datastore().get_latest_event_ids_in_room(self.room_id)
-        )  # type: List[str]
+        )
 
         events = [
             self._inject_state_event(sender=OTHER_USER)
@@ -236,8 +238,8 @@ class EventsStreamTestCase(BaseStreamTestCase):
         self.assertEqual(row.data.event_id, pl_event.event_id)
 
         # the state rows are unsorted
-        state_rows = []  # type: List[EventsStreamCurrentStateRow]
-        for stream_name, token, row in received_rows:
+        state_rows: List[EventsStreamCurrentStateRow] = []
+        for stream_name, _, row in received_rows:
             self.assertEqual("events", stream_name)
             self.assertIsInstance(row, EventsStreamRow)
             self.assertEqual(row.type, "state")
@@ -255,8 +257,7 @@ class EventsStreamTestCase(BaseStreamTestCase):
             self.assertIsNone(sr.event_id)
 
     def test_update_function_state_row_limit(self):
-        """Test replication with many state events over several stream ids.
-        """
+        """Test replication with many state events over several stream ids."""
 
         # we want to generate lots of state changes, but for this test, we want to
         # spread out the state changes over a few stream IDs.
@@ -282,15 +283,18 @@ class EventsStreamTestCase(BaseStreamTestCase):
         )
         pls["users"].update({u: 50 for u in user_ids})
         self.helper.send_state(
-            self.room_id, EventTypes.PowerLevels, pls, tok=self.user_tok,
+            self.room_id,
+            EventTypes.PowerLevels,
+            pls,
+            tok=self.user_tok,
         )
 
         # this is the point in the DAG where we make a fork
-        fork_point = self.get_success(
+        fork_point: List[str] = self.get_success(
             self.hs.get_datastore().get_latest_event_ids_in_room(self.room_id)
-        )  # type: List[str]
+        )
 
-        events = []  # type: List[EventBase]
+        events: List[EventBase] = []
         for user in user_ids:
             events.extend(
                 self._inject_state_event(sender=user) for _ in range(STATES_PER_USER)
@@ -351,8 +355,8 @@ class EventsStreamTestCase(BaseStreamTestCase):
             self.assertEqual(row.data.event_id, pl_events[i].event_id)
 
             # the state rows are unsorted
-            state_rows = []  # type: List[EventsStreamCurrentStateRow]
-            for j in range(STATES_PER_USER + 1):
+            state_rows: List[EventsStreamCurrentStateRow] = []
+            for _ in range(STATES_PER_USER + 1):
                 stream_name, token, row = received_rows.pop(0)
                 self.assertEqual("events", stream_name)
                 self.assertIsInstance(row, EventsStreamRow)
